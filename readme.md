@@ -1,7 +1,7 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/zhenyiizhang/CytoBridge_test/">
+  <a href="https://github.com/zhenyiizhang/CytoBridge/">
     <img src="figures/logo.png" alt="Logo" height="150" style="margin-bottom: 0px;">
   </a>
   
@@ -19,6 +19,15 @@ The core of CytoBridge is to model cellular processes by learning a dynamical mo
   * **Interaction**: (Planned) A term to model cell-cell communication and its effect on dynamics (Corresponds to **Unbalanced Mean Field Schrödinger Bridge**).
 
 The package is built to be modular, allowing users to easily combine these components to replicate existing models or create novel ones.
+
+<br />
+<div align="center">
+  <a href="https://github.com/zhenyiizhang/CytoBridge/">
+    <img src="figures/model.png" alt="model" height="350">
+  </a>
+
+</div>
+
 
 ## Current Status
 
