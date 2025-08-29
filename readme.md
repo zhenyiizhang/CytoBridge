@@ -82,7 +82,7 @@ cb.pp.preprocess(adata, time_key = 'Time point', dim_reduction = 'PCA', normaliz
 
 # 2. Train a model using a built-in configuration
 # The 'dynamical_ot' config uses the currently implemented 'velocity' components.
-# The 'unbalanced_ot' config uses the currently implemented 'velocity' components.
+# The 'unbalanced_ot' config uses the currently implemented 'velocity' and 'growth' components.
 # The `fit` function runs the entire training plan defined in the config.
 # The trained model and results are automatically saved to adata.uns['dynamic_model'], adata.obsm['velocity_latent'], adata.obsm['growth_rate']
 cb.tl.fit(adata, config='dynamical_ot', device='cuda')
