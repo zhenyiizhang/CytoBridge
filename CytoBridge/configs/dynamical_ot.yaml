@@ -1,0 +1,27 @@
+# Model structure
+model:
+  components: ['velocity']
+  velocity_net:
+    hidden_dim: 400
+    n_layers: 2
+    residual: false
+
+# Training plan
+training:
+  # Default parameters
+  defaults:
+    lr: 0.0001
+    lambda_ot: 1.0
+    lambda_mass: 0.01
+    lambda_energy: 0.01
+
+  plan:
+    - name: "Train"
+      mode: "neural_ode"
+      method: "ODEFunc"
+      epochs: 1000
+      global_mass: True
+      OT_loss: 'sinkhorn'
+      lambda_ot: 10
+      lambda_mass: 10
+      lambda_energy: 0.01
