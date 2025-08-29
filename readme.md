@@ -5,7 +5,7 @@
     <img src="figures/logo.png" alt="Logo" height="150" style="margin-bottom: 0px;">
   </a>
   
-  <h3 align="center">CytoBridge: A Toolkit for Spatiotemporal Dynamical Generative Modeling</h3>
+  <h3 align="center">CytoBridge: A Toolkit for Single Cell Spatiotemporal Dynamical Generative Modeling</h3>
 
 </div>
 
