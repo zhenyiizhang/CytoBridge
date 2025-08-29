@@ -90,6 +90,9 @@ cb.tl.fit(adata, config='dynamical_ot', device='cuda')
 # 3. Save the AnnData object with the model for later use
 adata.write_h5ad("results_with_model.h5ad")
 ```
+## LICENSE
+
+CytoBridge is licensed under the GPL-3.0 License.
 
 ## References
 
