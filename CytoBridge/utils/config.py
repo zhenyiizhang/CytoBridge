@@ -49,10 +49,10 @@ def load_config(config: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
         pkg_config_dir = Path(__file__).parent.parent / "configs"
 
         built_in_path = pkg_config_dir / f"{config_name}.yaml"
-        
+
         if built_in_path.is_file():
             print(f"Loading built-in config: '{config_name}'")
-            with open(built_in_path, 'r') as f:
+            with open(built_in_path, 'r', encoding='utf-8') as f:  # 修正：用 built_in_path（指向 configs/ruot.yaml）
                 return yaml.safe_load(f)
         else:
             # List all available built-in configs for a helpful error message.

@@ -9,6 +9,7 @@ model:
     hidden_dim: 400
     n_layers: 2
     residual: false
+ckpt_dir: '/home/sjt/workspace2/CytoBridge_test-main_crufm/results/simulation_unbalance'
 
 # Training plan
 training:
@@ -39,3 +40,9 @@ training:
       lambda_ot: 10
       lambda_mass: 10
       lambda_energy: 0.01
+
+
+  # Time Point 1.0: Wasserstein-1 Distance = 0.0492
+  # Time Point 2.0: Wasserstein-1 Distance = 0.0562
+  # Time Point 3.0: Wasserstein-1 Distance = 0.0401
+  # Time Point 4.0: Wasserstein-1 Distance = 0.0697

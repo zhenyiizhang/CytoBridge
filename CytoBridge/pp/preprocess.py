@@ -105,14 +105,25 @@ def preprocess(
         adata = adata[:, adata.var.highly_variable]
 
     # --- Dimension Reduction ---
+    # ---------- ：PCA | UMAP | none ----------
     if dim_reduction.lower() == 'pca':
-        if 'X_pca' not in adata.obsm.keys():
-            print(f"Computing {n_pcs} principal components.")
+        # 1. 如果还没算过 PCA，就现场算
+        if 'X_pca' not in adata.obsm:
             sc.pp.pca(adata, n_comps=n_pcs, svd_solver='arpack')
+        # 2. 把 PCA 结果当作“潜空间”
         adata.obsm['X_latent'] = adata.obsm['X_pca']
+
+    elif dim_reduction.lower() == 'umap':
+        if 'X_pca' not in adata.obsm:
+            sc.pp.pca(adata, n_comps=n_pcs, svd_solver='arpack')
+        sc.pp.neighbors(adata, n_pcs=n_pcs)
+        sc.tl.umap(adata)
+        adata.obsm['X_latent'] = adata.obsm['X_umap']
+
     elif dim_reduction.lower() == 'none' or dim_reduction is None:
-        print("No dimension reduction.")
+        # 直接用原始表达矩阵
         adata.obsm['X_latent'] = adata.X
+
     else:
         raise ValueError(f"Invalid dimension reduction method: {dim_reduction}")
 
