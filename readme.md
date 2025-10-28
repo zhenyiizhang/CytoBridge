@@ -4,7 +4,7 @@
   <a href="https://github.com/zhenyiizhang/CytoBridge/">
     <img src="figures/logo.png" alt="Logo" height="150" style="margin-bottom: 0px;">
   </a>
-  
+
   <h3 align="center">CytoBridge: A Toolkit for Single Cell Spatiotemporal Dynamical Generative Modeling</h3>
 
 </div>
@@ -25,7 +25,6 @@ The package is built to be modular, allowing users to easily combine these compo
   <a href="https://github.com/zhenyiizhang/CytoBridge/">
     <img src="figures/model.png" alt="model" height="350">
   </a>
-
 </div>
 
 
@@ -34,29 +33,12 @@ The package is built to be modular, allowing users to easily combine these compo
 CytoBridge is currently under active development. The foundational framework is in place, and we have implemented the following models:
 
   * **Dynamical OT** (velocity)
+
   * **Unbalanced Dynamical OT** (velocity + growth)
 
-## Roadmap
-
-We are continuously working to expand the capabilities of CytoBridge. Our development plan is as follows:
-
-  - [ ] **Phase 1: Stochastic Dynamics & RUOT**
-
-      - [ ] Implementation of the `score` component to model stochasticity.
-      - [ ] Support for training methods based on the **Regularized Unbalanced Optimal Transport (RUOT)** frameworks.
-      - [ ] Integration of simulation-free training methods (e.g., Conditional Flow Matching, Velocity-growth Flow Matching).
-      - [ ] Basic plotting functions and downstream analysis.
-
-  - [ ] **Phase 2: Advanced Modeling & Downstream Analysis**
-
-      - [ ] Implementation of the `interaction` component for modeling cell-cell communication.
-      - [ ] Advanced plotting functions and downstream analysis.
+  * **Regularized Unbalanced OT (RUOT)**  (velocity + growth + stochasticity)
 
 
-  - [ ] **Phase 3: Spatiotemporal Dynamics**
-
-      - [ ] Support for time serise spatial transcriptomics data.
-      - [ ] Advanced plotting functions and downstream analysis.
 ## Installation
 
 Currently, CytoBridge is in an early development stage. You can download it directly from this repository for testing and contribution:
@@ -66,6 +48,8 @@ git clone https://github.com/zhenyiizhang/CytoBridge.git
 ```
 
 *(A PyPI release is planned for the future.)*
+
+
 
 ## Basic Usage
 
@@ -77,6 +61,8 @@ conda activate CytoBridge
 cd path_to_CytoBridge
 pip install -r requirements.txt
 ```
+
+**usage1** (for h5ad):
 
 Here is a simple example of how to use CytoBridge, from preprocessing data to training a model and saving the results.
 
@@ -92,6 +78,8 @@ cb.pp.preprocess(adata, time_key = 'Time point', dim_reduction = 'PCA', normaliz
 # 2. Train a model using a built-in configuration
 # The 'dynamical_ot' config uses the currently implemented 'velocity' components.
 # The 'unbalanced_ot' config uses the currently implemented 'velocity' and 'growth' components.
+# The 'RUOT' config uses the currently implemented 'velocity' and 'growth' components.
+
 # The `fit` function runs the entire training plan defined in the config.
 # The trained model and results are automatically saved to adata.uns['dynamic_model'], adata.obsm['velocity_latent'], adata.obsm['growth_rate']
 cb.tl.fit(adata, config='dynamical_ot', device='cuda')
@@ -99,6 +87,40 @@ cb.tl.fit(adata, config='dynamical_ot', device='cuda')
 # 3. Save the AnnData object with the model for later use
 adata.write_h5ad("results_with_model.h5ad")
 ```
+**usage2** (for csv):
+
+Here is a simple example of how to use CytoBridge, from preprocessing data to training a model and saving the results.
+
+```python
+import pandas as pd
+from anndata import AnnData
+import scanpy as sc
+import cytobridge as cb
+
+# 1. Load gene-expression table (rows = cells, columns = one “samples” column:cell_times  + gene expression martix)
+df = pd.read_csv('/lustre/home/2501111653/DeepRUOTv2_test_data/data/simulation_gene.csv')
+
+# 2. Build the observations (obs) DataFrame: index = cell identifiers
+obs = pd.DataFrame(index=df.index)
+obs['samples'] = df['samples'].values          # keep the cell_time in .obs
+
+# 3. Remove the non-expression column to obtain the pure expression matrix
+X = df.drop(columns=['samples']).values        # X: numpy array, genes × cells
+
+# 4. Create AnnData object
+adata = AnnData(X=X, obs=obs)
+# 5.  preprocess 
+adata = cb.pp.preprocess(adata, time_key = 'samples', dim_reduction = 'none', normalization = False, log1p = False, select_hvg = False)
+adata = cb.tl.fit(adata, config = 'ruot', device = 'cuda')
+
+# 3. Save the AnnData object with the model for later use
+adata.write_h5ad("results_with_model.h5ad")
+```
+
+## Detailed usage
+
+Please refer to CytoBridge/test.ipynb（demonstration） ,CytoBridge/evalutation/test1 (training) and CytoBridge/evalutation/test2(donestream analysis)
+
 ## LICENSE
 
 CytoBridge is licensed under the GPL-3.0 License.

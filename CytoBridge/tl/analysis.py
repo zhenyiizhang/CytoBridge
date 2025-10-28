@@ -1,13 +1,15 @@
+# --------------------------------------------------------------------------------------------------
+# 1. Velocity computation: load trained model and compute latent‐space velocity
+# --------------------------------------------------------------------------------------------------
 from CytoBridge.utils import load_model_from_adata
 import torch
 import math
 import numpy as np
-from torchdiffeq import odeint
 
 def compute_velocity(adata, device='cuda'):
-    '''
+    """
     Calculate velocity based on the trained model 
-    '''
+    """
     model = load_model_from_adata(adata)
     model.to(device)
     # Calculate velocity and growth on the dataset for downstream analysis
@@ -19,239 +21,405 @@ def compute_velocity(adata, device='cuda'):
     adata.layers['velocity_latent'] = velocity.detach().cpu().numpy()
 
     return adata
-def compute_growth(adata, device='cuda'):
-    '''
-    Calculate velocity based on the trained model 
-    '''
-    model = load_model_from_adata(adata)
-    model.to(device)
-    # Calculate velocity and growth on the dataset for downstream analysis
-    all_times = torch.tensor(adata.obs['time_point_processed']).unsqueeze(1).float().to(device)
-    all_data = torch.tensor(adata.obsm['X_latent']).float().to(device)
-    net_input = torch.cat([all_data, all_times], dim = 1)
-    with torch.no_grad():
-        growth = model.growth_net(net_input)
-    adata.obsm['growth_rate'] = growth.detach().cpu().numpy()
 
-    return adata
-#%%
-def euler_odeint_split(ode_func, initial_state, ts, noise_std=0.01):
+# --------------------------------------------------------------------------------------------------
+# 2. SDE core: Itô SDE with diagonal noise for latent state + log-weight
+# --------------------------------------------------------------------------------------------------
+import os
+import numpy as np
+import torch
+from typing import Tuple
+import torch
+from torch.nn import Module
+
+
+class CytoSDE(Module):
     """
-    Integrate a cell-population ODE with discrete cell division and death events.
-    The solver uses an Euler scheme and keeps track of lineage relationships,
-    split times, alive status and death steps for every trajectory.
+    SDE definition for CytoBridge models (Ito-type with diagonal noise).
+    Computes drift (f) and diffusion (g) terms for latent state (z) and log-weight (lnw).
+    
+    Attributes
+    ----------
+    noise_type : str
+        Type of noise ("diagonal" = independent noise per dimension).
+    sde_type : str
+        Type of SDE ("ito" = Ito calculus).
+    model : torch.nn.Module
+        Pre-trained CytoBridge model (must include velocity/score/growth networks as components).
+    sigma : float
+        Global diffusion coefficient scaling noise magnitude.
+    """
+    noise_type = "diagonal"  # Diagonal noise (independent across dimensions)
+    sde_type = "ito"         # Ito-type SDE
 
+    def __init__(self, model, sigma=1.0):
+        super().__init__()
+        self.model = model    # Trained CytoBridge model (contains velocity/score/growth nets)
+        self.sigma = sigma    # Diffusion coefficient for noise scaling
+
+    def f(self, t, y):
+        """
+        Compute drift term f(t, y) for the SDE.
+        
+        Parameters
+        ----------
+        t : torch.Tensor
+            Current time (shape: [1]).
+        y : tuple[torch.Tensor, torch.Tensor]
+            Current state (z, lnw), where:
+            - z: Latent state (shape: [batch_size, latent_dim])
+            - lnw: Log-weight for particles (shape: [batch_size, 1])
+        
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Drift terms for z and lnw (same shapes as input y).
+        """
+        z, lnw = y
+        # Expand time to match batch size of z
+        t_expand = t.expand(z.shape[0], 1).to(dtype=z.dtype)
+        # Input to velocity network: latent features + time
+        vel_in = torch.cat([z, t_expand], 1)
+        
+        # Compute drift for z (base velocity + score correction if available)
+        drift_z = self.model.velocity_net(vel_in)
+        if "score" in self.model.components:
+            _, gradients = self.model.compute_score(t, z)  # Assume compute_score returns (score, gradients)
+            drift_z += gradients
+        
+        # Compute drift for lnw (growth term if available, else zero)
+        if "growth" in self.model.components:
+            drift_lnw = self.model.growth_net(vel_in)
+        else:
+            drift_lnw = torch.zeros_like(lnw)
+        
+        return (drift_z, drift_lnw)
+
+    def g(self, t, y):
+        """
+        Compute diffusion term g(t, y) for the SDE.
+        Noise is applied to z (latent state) but not to lnw (log-weight).
+        
+        Parameters
+        ----------
+        t : torch.Tensor
+            Current time (shape: [1]).
+        y : tuple[torch.Tensor, torch.Tensor]
+            Current state (z, lnw) (shapes: [batch_size, latent_dim], [batch_size, 1]).
+        
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Diffusion terms for z and lnw (same shapes as input y).
+        """
+        z, lnw = y
+        return (torch.ones_like(z) * self.sigma,  # Diffusion for z
+                torch.ones_like(lnw) * self.sigma * 0.0)  # No diffusion for lnw
+
+
+# --------------------------------------------------------------------------------------------------
+# 3. Euler–Maruyama integrator for Itô SDE
+# --------------------------------------------------------------------------------------------------
+import math
+import torch
+
+
+def euler_sdeint(sde, y0, dt, ts):
+    """
+    Numerical integration of SDE using Euler-Maruyama method (for Ito-type SDEs).
+    
     Parameters
     ----------
-    ode_func : callable
-        Right-hand side of the ODE: f(t, (z, lnw, m)) -> (dz/dt, d(lnw)/dt, dm/dt).
-    initial_state : tuple of torch.Tensor
-        (z, lnw, m) at t = ts[0].
+    sde : CytoSDE
+        SDE object with f (drift) and g (diffusion) methods.
+    y0 : tuple[torch.Tensor, torch.Tensor]
+        Initial state (z0, lnw0):
+        - z0: Initial latent state (shape: [batch_size, latent_dim])
+        - lnw0: Initial log-weight (shape: [batch_size, 1])
+    dt : float
+        Integration time step (fixed).
     ts : torch.Tensor
-        Strictly increasing time points at which the solution is returned.
-    noise_std : float, optional
-        Gaussian noise added to daughter-cell latent states after division.
-
+        Target time points to record (shape: [n_time_points], sorted in ascending order).
+    
     Returns
     -------
-    z_hist : torch.Tensor
-        Stacked latent states over time, shape (len(ts), n_trajectories, dim_z).
-        Dead trajectories are padded with NaN.
-    lnw_hist : torch.Tensor
-        Stacked log-weights over time, shape (len(ts), n_trajectories, 1).
+    tuple[torch.Tensor, torch.Tensor]
+        - z_traj: Latent state trajectories (shape: [n_time_points, batch_size, latent_dim])
+        - lnw_traj: Log-weight trajectories (shape: [n_time_points, batch_size, 1])
     """
+    # Initialize state and current time
+    y, t = y0, ts[0].item()
+    out = []  # Store states at target time points
+    ts_lst = ts.tolist()  # Convert target times to list for iteration
+    idx = 0  # Index for target time points
+
+    # Iterate until exceeding maximum target time
+    while t <= ts_lst[-1] + 1e-8:
+        # Record state if current time matches target time (within tolerance)
+        if t >= ts_lst[idx] - 1e-8:
+            out.append(y)
+            idx += 1
+            if idx >= len(ts_lst):
+                break  # Exit if all target times are recorded
+        
+        # Convert current time to tensor (matches model input format)
+        t_tensor = torch.tensor([t], dtype=torch.float32, device=y[0].device)
+        
+        # Compute drift and diffusion terms
+        f_z, f_lnw = sde.f(t_tensor, y)
+        g_z, g_lnw = sde.g(t_tensor, y)
+        
+        # Generate Gaussian noise (scaled by sqrt(dt) for Ito calculus)
+        noise_z = torch.randn_like(y[0]) * math.sqrt(dt)
+        noise_lnw = torch.randn_like(y[1]) * math.sqrt(dt)
+        
+        # Euler-Maruyama update: y_{t+dt} = y_t + f*dt + g*noise
+        y = (y[0] + f_z * dt + g_z * noise_z,
+             y[1] + f_lnw * dt + g_lnw * noise_lnw)
+        
+        # Step forward in time
+        t += dt
+
+    # Fill missing target times with last recorded state (due to numerical tolerance)
+    while len(out) < len(ts_lst):
+        out.append(out[-1])
+
+    # Reshape output to [n_time_points, batch_size, ...]
+    z_traj = torch.stack([o[0] for o in out])
+    lnw_traj = torch.stack([o[1] for o in out])
+    return z_traj, lnw_traj
+
+
+# --------------------------------------------------------------------------------------------------
+# 4. High-level wrapper: generate SDE trajectories and save
+# --------------------------------------------------------------------------------------------------
+def generate_sde_trajectories(
+    adata,
+    exp_dir: str,
+    device: str | torch.device,
+    sigma: float,
+    n_time_steps: int,
+    sample_traj_num: int,
+    sample_cell_tra_consistent: bool,
+    init_time: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+
+    ----
+    sde_traj : np.ndarray
+         (n_steps, n_sample_cells, latent_dim)
+    sde_point : np.ndarray
+         (n_time_points, n_cells_used, latent_dim)
+    w_point : np.ndarray
+         (n_time_points, n_cells_used, 1) 
+    """
+    device = torch.device(device)
+    os.makedirs(exp_dir, exist_ok=True)
+    # ---------- Load Pre-trained Model ----------
+    print("Loading model from adata...")
+    model = load_model_from_adata(adata).to(device).float()  # Assume load_model_from_adata is predefined
+    model.eval()
+    print(f"Model components: {model.components}")
+
+    time_key = "time_point_processed"
+    all_times = sorted(adata.obs[time_key].unique())
+    ts_points = torch.tensor(all_times, dtype=torch.float32, device=device)
+    ts_continuous = torch.linspace(
+        all_times[0], all_times[-1], n_time_steps,
+        dtype=torch.float32, device=device
+    )
+
+    init_mask = adata.obs[time_key] == init_time
+    if not init_mask.any():
+        raise ValueError(f"No data found for init_time={init_time}")
+    x0 = torch.tensor(adata[init_mask].obsm["X_latent"], dtype=torch.float32, device=device)
+    x0 = x0.requires_grad_(True)
+    lnw0 = torch.log(torch.ones(x0.shape[0], 1, device=device) / x0.shape[0])
+    initial_state = (x0, lnw0)
+
+    # ---------- 4. SDE Integration ----------
+    sde = CytoSDE(model, sigma).to(device)
+    dt = (all_times[-1] - all_times[0]) / (n_time_steps - 1)
+    sde_traj, traj_lnw = euler_sdeint(sde, initial_state, dt, ts_continuous)
+    sde_point, point_lnw = euler_sdeint(sde, initial_state, dt, ts_points)
+
+    # ---------- 5. Sampling / Consistency Filtering ----------
+    sample_traj_num = min(sample_traj_num, x0.shape[0])
+    traj_cell_indices = torch.randperm(x0.shape[0], device=device)[:sample_traj_num]
+
+
+    sde_traj = sde_traj[:, traj_cell_indices]
+    traj_lnw = traj_lnw[:, traj_cell_indices]
+    print(f"sample_cell_tra_consistent=False: "
+            f"Using {sample_traj_num} cells for trajectories, all cells for predictions")
+
+    # ---------- 6. Convert to numpy / Normalize weights ----------
+    sde_traj = sde_traj.detach().cpu().numpy()
+    sde_point = sde_point.detach().cpu().numpy()
+    w_point = torch.exp(point_lnw).detach().cpu().numpy()
+    w_point /= w_point.sum(axis=1, keepdims=True)
+
+    # ---------- 7. Save ----------
+    np.save(os.path.join(exp_dir, "sde_trajec.npy"), sde_traj)
+    np.save(os.path.join(exp_dir, "sde_point.npy"), sde_point)
+    np.save(os.path.join(exp_dir, "sde_weight.npy"), w_point)
+
+    return sde_traj, sde_point, w_point
+
+
+# --------------------------------------------------------------------------------------------------
+# 5. Euler integrator with splitting (branching & extinction) for ODE
+# --------------------------------------------------------------------------------------------------
+import torch
+import math
+import numpy as np
+from torchdiffeq import odeint
+
+def euler_odeint_split(ode_func, initial_state, ts, noise_std=0.01):
     device = initial_state[0].device
     t0, tf = ts[0].item(), ts[-1].item()
     current_t = t0
     current_z, current_lnw, current_m = initial_state
-    w_prev = torch.exp(current_lnw)  # previous weights for ratio computation
+    w_prev = torch.exp(current_lnw)  # initial weight
+    
+    # keep initial shapes for later reference
+    initial_size = current_z.shape[0]
+    feature_size = current_z.shape[1]  # feature dimension
 
-    # Lineage bookkeeping
-    replication_parents = torch.zeros(current_z.shape[0], 1, dtype=torch.long, device=device)
-    replication_parents[:] = -1  # -1: no parent
-    split_times = torch.full((current_z.shape[0], 1), -1.0, device=device)
-    alive_mask = torch.ones(current_z.shape[0], 1, dtype=torch.bool, device=device)
-    death_step = torch.full((current_z.shape[0], 1), -1, dtype=torch.long, device=device)  # -1: alive
-
-    feature_size = current_z.shape[1]
-    m_size = current_m.shape[1]
     ts_list = ts.tolist()
-    n_bins = len(ts_list)
+    # -------------------------- key modification 1: store all time-step history (for back-tracking copy) --------------------------
+    # history format: [time_step0_data, time_step1_data, ...], each element is (z, lnw)
+    history_z = [current_z.clone()]  # particle feature history at initial step (t0)
+    history_lnw = [current_lnw.clone()]  # log-weight history at initial step (t0)
+    idx_next = 1  # start iteration from step 1 (t0 already stored in history)
 
-    # History lists: one entry per output time step
-    history_z = [current_z.clone()]
-    history_lnw = [current_lnw.clone()]
-    history_m = [current_m.clone()]
-    history_parents = [replication_parents.clone()]
-    history_split_times = [split_times.clone()]
-    history_alive = [alive_mask.clone()]
-    history_death_step = [death_step.clone()]
-
-    idx_next = 1
-    check_frequency = 1
-    step_counter = 0
-
-    while current_t <= tf + 1e-8 and idx_next < n_bins:
+    while current_t <= tf + 1e-8 and idx_next < len(ts_list):
         t_tensor = torch.tensor([current_t], device=device)
         f_z, f_lnw, f_m = ode_func(t_tensor, (current_z, current_lnw, current_m))
 
+        # 1. Euler update for current step
         dt_step = ts_list[idx_next] - current_t
-        new_z = current_z + f_z * dt_step
+        new_z   = current_z   + f_z   * dt_step
         new_lnw = current_lnw + f_lnw * dt_step
-        new_m = current_m + f_m * dt_step
-        next_t = ts_list[idx_next]
+        new_m   = current_m   + f_m   * dt_step
+        current_t = ts_list[idx_next]
 
         w_next = torch.exp(new_lnw)
-        ratio = w_next / w_prev  # weight ratio for split/extinction decisions
-        current_size = new_z.shape[0]
+        ratio = w_next / w_prev
+        current_size = new_z.shape[0]  # current particle number
 
-        # Division and extinction logic
-        if step_counter % check_frequency == 0:
-            # 1. Cell division: only alive cells can divide
-            mask_split = (ratio >= 1).squeeze(-1) & alive_mask.squeeze(-1)
-            split_count = mask_split.sum().item()
-            total_new_cells = 0
+        # -------------------------- 2. Splitting: add “back-track copy history” logic --------------------------
+        mask_split = (ratio >= 1).squeeze(-1)
+        # data after split: contains “original split particles + new split particles”
+        split_z = new_z[mask_split].clone()  # keep original split particles (not dropped)
+        split_lnw = new_lnw[mask_split].clone()
+        split_m = new_m[mask_split].clone()
+        # record original split particle indices (for later back-track copy history)
+        original_split_indices = torch.where(mask_split)[0]
+        
+        if mask_split.any():
+            r_split = ratio[mask_split].squeeze(-1)
+            z_split_original = new_z[mask_split]  # original split particles (to be split)
+            lnw_split_original = new_lnw[mask_split]
+            m_split_original = new_m[mask_split]
 
-            if split_count > 0:
-                r_split = ratio[mask_split].squeeze(-1)
-                floor_r = torch.floor(r_split)
-                frac_r = r_split - floor_r
-                rand_f = torch.rand_like(frac_r)
-                mj = floor_r.int() + (rand_f < frac_r).int()
-                mj_new = torch.max(torch.zeros_like(mj), mj - 1)
-                total_new_cells = mj_new.sum().item()
+            # compute split number for each original split particle (same as original logic)
+            floor_r = torch.floor(r_split)
+            frac_r = r_split - floor_r
+            rand_f = torch.rand_like(frac_r)
+            mj = floor_r.int() + (rand_f < frac_r).int()  # split mj new particles from each original particle
+            valid = mj > 0
 
-                if total_new_cells > 0:
-                    new_z_list, new_lnw_list, new_m_list = [], [], []
-                    new_parents_list, new_split_times_list = [], []
-                    new_death_step_list = []
+            if valid.any():
+                # filter valid original particle indices
+                valid_mask = valid
+                valid_mj = mj[valid_mask]  # valid split numbers
+                valid_original_indices = original_split_indices[valid_mask]  # global indices of valid original split particles
+                valid_z = z_split_original[valid_mask]
+                valid_lnw = lnw_split_original[valid_mask]
+                valid_m = m_split_original[valid_mask]
 
-                    for i in range(split_count):
-                        if mj_new[i] == 0:
-                            continue
-                        parent_idx = torch.where(mask_split)[0][i]
-                        rep_z = new_z[parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
-                        rep_lnw = new_lnw[parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
-                        rep_m = new_m[parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
-                        rep_z += torch.normal(0, noise_std, size=rep_z.shape, device=device)
+                # generate new split particles (current step data)
+                new_split_z_list = []
+                new_split_lnw_list = []
+                for i in range(len(valid_mj)):
+                    mj_i = valid_mj[i].item()  # the i-th original particle splits mj_i new particles
+                    original_idx_i = valid_original_indices[i].item()  # global index of the i-th original particle
 
-                        new_parents = torch.full((mj_new[i], 1), parent_idx, dtype=torch.long, device=device)
-                        new_split = torch.full((mj_new[i], 1), next_t, device=device)
-                        new_death = torch.full((mj_new[i], 1), -1, dtype=torch.long, device=device)
+                    # a. generate current-step new split particle data (with noise)
+                    rep_z = valid_z[i].unsqueeze(0).repeat(mj_i, 1)  # replicate mj_i times
+                    rep_lnw = valid_lnw[i].unsqueeze(0).repeat(mj_i, 1)
+                    noise = torch.normal(0, noise_std, size=rep_z.shape, device=device)
+                    new_z_i = rep_z + noise
+                    new_lnw_i = rep_lnw
 
-                        new_z_list.append(rep_z)
-                        new_lnw_list.append(rep_lnw)
-                        new_m_list.append(rep_m)
-                        new_parents_list.append(new_parents)
-                        new_split_times_list.append(new_split)
-                        new_death_step_list.append(new_death)
-
-                    # Concatenate new daughter cells
-                    new_z_cells = torch.cat(new_z_list, dim=0) if new_z_list else torch.empty(0, feature_size, device=device)
-                    new_lnw_cells = torch.cat(new_lnw_list, dim=0) if new_lnw_list else torch.empty(0, 1, device=device)
-                    new_m_cells = torch.cat(new_m_list, dim=0) if new_m_list else torch.empty(0, m_size, device=device)
-                    new_parents = torch.cat(new_parents_list, dim=0) if new_parents_list else torch.empty(0, 1, dtype=torch.long, device=device)
-                    new_split_times = torch.cat(new_split_times_list, dim=0) if new_split_times_list else torch.empty(0, 1, device=device)
-                    new_death_steps = torch.cat(new_death_step_list, dim=0) if new_death_step_list else torch.empty(0, 1, dtype=torch.long, device=device)
-
-                    current_z = torch.cat([new_z, new_z_cells], dim=0)
-                    current_lnw = torch.cat([new_lnw, new_lnw_cells], dim=0)
-                    current_m = torch.cat([new_m, new_m_cells], dim=0)
-                    replication_parents = torch.cat([replication_parents, new_parents], dim=0)
-                    split_times = torch.cat([split_times, new_split_times], dim=0)
-                    alive_mask = torch.cat([alive_mask, torch.ones(new_z_cells.shape[0], 1, dtype=torch.bool, device=device)], dim=0)
-                    death_step = torch.cat([death_step, new_death_steps], dim=0)
-
-                    # Expand historical records to keep dimensions consistent
+                    # b. key: back-track copy original particle history (fill new particles' previous time steps)
+                    # traverse all historical time steps (from t0 to current step minus 1), copy original particle history
                     for hist_idx in range(len(history_z)):
-                        for i in range(split_count):
-                            if mj_new[i] == 0:
-                                continue
-                            parent_idx = torch.where(mask_split)[0][i]
-                            hz = history_z[hist_idx][parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
-                            hl = history_lnw[hist_idx][parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
-                            hm = history_m[hist_idx][parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
-                            hp = history_parents[hist_idx][parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
-                            hs = history_split_times[hist_idx][parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
-                            ha = history_alive[hist_idx][parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
-                            hd = history_death_step[hist_idx][parent_idx].unsqueeze(0).repeat(mj_new[i], 1)
+                        # original particle data at historical time step
+                        hist_z_original = history_z[hist_idx][original_idx_i].unsqueeze(0)
+                        hist_lnw_original = history_lnw[hist_idx][original_idx_i].unsqueeze(0)
+                        # replicate to new particles' history (each new particle has same history as original)
+                        history_z[hist_idx] = torch.cat([history_z[hist_idx], hist_z_original.repeat(mj_i, 1)], dim=0)
+                        history_lnw[hist_idx] = torch.cat([history_lnw[hist_idx], hist_lnw_original.repeat(mj_i, 1)], dim=0)
 
-                            history_z[hist_idx] = torch.cat([history_z[hist_idx], hz], dim=0)
-                            history_lnw[hist_idx] = torch.cat([history_lnw[hist_idx], hl], dim=0)
-                            history_m[hist_idx] = torch.cat([history_m[hist_idx], hm], dim=0)
-                            history_parents[hist_idx] = torch.cat([history_parents[hist_idx], hp], dim=0)
-                            history_split_times[hist_idx] = torch.cat([history_split_times[hist_idx], hs], dim=0)
-                            history_alive[hist_idx] = torch.cat([history_alive[hist_idx], ha], dim=0)
-                            history_death_step[hist_idx] = torch.cat([history_death_step[hist_idx], hd], dim=0)
-            else:
-                current_z, current_lnw, current_m = new_z, new_lnw, new_m
+                    # c. collect current-step new split particle data
+                    new_split_z_list.append(new_z_i)
+                    new_split_lnw_list.append(new_lnw_i)
 
-            # Recompute ratio after division so sizes match
-            if total_new_cells > 0:
-                new_w_cells = torch.exp(new_lnw_cells)
-                w_next = torch.cat([w_next, new_w_cells], dim=0)
-                new_w_prev = []
-                for i in range(split_count):
-                    if mj_new[i] > 0:
-                        parent_idx = torch.where(mask_split)[0][i]
-                        new_w_prev.append(w_prev[parent_idx].unsqueeze(0).repeat(mj_new[i], 1))
-                if new_w_prev:
-                    new_w_prev = torch.cat(new_w_prev, dim=0)
-                    w_prev = torch.cat([w_prev, new_w_prev], dim=0)
-                ratio = w_next / w_prev
+                # merge all new split particles' current-step data
+                if new_split_z_list:
+                    new_split_z = torch.cat(new_split_z_list, dim=0)
+                    new_split_lnw = torch.cat(new_split_lnw_list, dim=0)
+                    new_split_m = valid_m.unsqueeze(0).repeat_interleave(valid_mj, dim=1).squeeze(0)
+                    # add new split particles to current step split result (original + new)
+                    split_z = torch.cat([split_z, new_split_z], dim=0)
+                    split_lnw = torch.cat([split_lnw, new_split_lnw], dim=0)
+                    split_m = torch.cat([split_m, new_split_m], dim=0)
 
-            # 2. Extinction: remove cells probabilistically
-            mask_extinct = (ratio < 1).squeeze(-1) & alive_mask.squeeze(-1)
-            if mask_extinct.any():
-                r_ext = ratio[mask_extinct].squeeze(-1)
-                keep_mask = torch.rand_like(r_ext) < r_ext
-                dying_mask = ~keep_mask
-                dying_indices = mask_extinct.nonzero(as_tuple=True)[0][dying_mask]
+        # -------------------------- 3. Extinction: change to “set NaN instead of drop” --------------------------
+        mask_extinct = ~mask_split
+        # keep all extinct particle indices, set dead particles to NaN (not dropped, ensure consistent indexing)
+        extinct_z = new_z[mask_extinct].clone()
+        extinct_lnw = new_lnw[mask_extinct].clone()
+        extinct_m = new_m[mask_extinct].clone()
+        
+        if mask_extinct.any():
+            r_ext = ratio[mask_extinct].squeeze(-1)
+            # generate survival mask: True=survive, False=dead (set to NaN)
+            keep_mask = torch.rand_like(r_ext) < r_ext
+            # set dead particles to NaN (keep index, no further update)
+            extinct_z[~keep_mask] = torch.nan
+            extinct_lnw[~keep_mask] = torch.nan
+            extinct_m[~keep_mask] = torch.nan
 
-                alive_mask[dying_indices] = False
-                death_step[dying_indices] = idx_next  # record death step
+        # -------------------------- 4. Merge: keep all particle indices (split + extinct) --------------------------
+        current_z = torch.cat([split_z, extinct_z], dim=0)
+        current_lnw = torch.cat([split_lnw, extinct_lnw], dim=0)
+        current_m = torch.cat([split_m, extinct_m], dim=0)
+        w_prev = torch.exp(current_lnw)  # update weight
 
-                # Set states of dead trajectories to NaN
-                current_z[dying_indices] = torch.nan
-                current_lnw[dying_indices] = torch.nan
-                current_m[dying_indices] = torch.nan
-
-            w_prev = torch.exp(current_lnw)
-        else:
-            # Non-check step: update alive states only
-            dead_mask = ~alive_mask.squeeze(-1) & ~torch.isnan(current_z).any(dim=1)
-            if dead_mask.any():
-                dead_indices = dead_mask.nonzero(as_tuple=True)[0]
-                current_z[dead_indices] = torch.nan
-                current_lnw[dead_indices] = torch.nan
-                current_m[dead_indices] = torch.nan
-
-            current_z, current_lnw, current_m = new_z, new_lnw, new_m
-            w_prev = w_next
-
-        # Append current state to history
+        # -------------------------- 5. save current step data to history (for later split back-track) --------------------------
         history_z.append(current_z.clone())
         history_lnw.append(current_lnw.clone())
-        history_m.append(current_m.clone())
-        history_parents.append(replication_parents.clone())
-        history_split_times.append(split_times.clone())
-        history_alive.append(alive_mask.clone())
-        history_death_step.append(death_step.clone())
-
         idx_next += 1
-        step_counter += 1
 
-        if step_counter % check_frequency == 0:
-            alive_count = alive_mask.sum().item()
-            print(f"Step {step_counter}, total trajectories: {current_z.shape[0]}, alive: {alive_count}")
-        if step_counter == n_bins:
-            break
-
-    # Stack history over time
-    out_z = torch.stack(history_z, dim=0)
-    print(out_z.shape)
-    out_lnw = torch.stack(history_lnw, dim=0)
+    # -------------------------- 6. unify shapes for all time steps (history already complete, simply stack) --------------------------
+    # history already contains all particles (original + split) with complete time series, stack directly
+    out_z = torch.stack(history_z, dim=0)  # shape: (time_steps, num_particles, feature_size)
+    out_lnw = torch.stack(history_lnw, dim=0)  # shape: (time_steps, num_particles, 1)
+    
     return out_z, out_lnw
+
+
+# --------------------------------------------------------------------------------------------------
+# 6. High-level wrapper: generate ODE trajectories with optional splitting
+# --------------------------------------------------------------------------------------------------
+from typing import List
+import os, time
+from ..tl.methods import ODEFunc
+
+
 def generate_ode_trajectories(
         model,
         adata,
@@ -262,7 +430,6 @@ def generate_ode_trajectories(
         exp_dir: str = None,          
         split_true: str = False
 ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
-
 
     device = torch.device(device)
     model.to(device).eval()
@@ -276,24 +443,23 @@ def generate_ode_trajectories(
     init_mask = adata.obs[samples_key] == init_time
     init_idx = np.where(init_mask)[0]
     replace = len(init_idx) < n_trajectories
-    np.random.seed(21)          # 把 42 换成任意整数
 
     chosen_init_idx = np.random.choice(init_idx, size=n_trajectories, replace=replace)
     init_x = torch.tensor(X_raw[chosen_init_idx], dtype=torch.float32, device=device)
 
     from ..tl.methods import ODEFunc
-    ode_func = ODEFunc(model,use_mass=True,score_use=False).to(device)
+    ode_func = ODEFunc(model, use_mass=True, score_use=False).to(device)
 
     t_min, t_max = float(unique_times[0]), float(unique_times[-1])
     t_bins  = torch.linspace(t_min, t_max, n_bins, device=device)
     t_point = torch.tensor(unique_times, dtype=torch.float32, device=device)
 
-    init_lnw = torch.ones(n_trajectories, 1, dtype=torch.float32, device=device, requires_grad=True)
+    init_lnw = torch.zeros(n_trajectories, 1, dtype=torch.float32, device=device, requires_grad=True)
     init_m   = torch.zeros_like(init_lnw)
     initial_state = (init_x, init_lnw, init_m)
     if split_true :
-        traj_x, traj_lnw  = euler_odeint_split(ode_func, initial_state, t_bins)
-        point_x, point_lnw  = euler_odeint_split(ode_func, initial_state, t_point)
+        traj_x, traj_lnw ,_ = euler_odeint_split(ode_func, initial_state, t_bins)
+        point_x, point_lnw,_  = euler_odeint_split(ode_func, initial_state, t_point)
     else :
         traj_x, traj_lnw, _ = odeint(ode_func, initial_state, t_bins,  method='euler')
         point_x, point_lnw, _ = odeint(ode_func, initial_state, t_point, method='euler')
@@ -302,26 +468,31 @@ def generate_ode_trajectories(
     traj_lnw    = traj_lnw.detach().cpu().numpy().squeeze(-1)  # (T, M)
     point_array = point_x.detach().cpu().numpy()         # (T, M, D)
     point_lnw   = point_lnw.detach().cpu().numpy().squeeze(-1)  # (T, M)
-
-    import os
-    np.save(os.path.join(exp_dir, "ode_traj.npy"),   traj_array)
-    np.save(os.path.join(exp_dir, "ode_traj_lnw.npy"), traj_lnw)
-
-
-    print(f"[generate_ode_trajectories] trajectories saved to {exp_dir}")
+    # save
+    if exp_dir is not None:
+        import os
+        os.makedirs(exp_dir, exist_ok=True)
+        np.save(os.path.join(exp_dir, "ode_traj.npy"), traj_array)
+        np.save(os.path.join(exp_dir, "ode_traj_lnw.npy"), traj_lnw)
+        np.save(os.path.join(exp_dir, "ode_point.npy"),  point_array)
+        np.save(os.path.join(exp_dir, "ode_point_lnw.npy"), point_lnw)
+        print(f"[generate_ode_trajectories] trajectories saved to {exp_dir}")
 
     return point_array, traj_array
 
 
+# --------------------------------------------------------------------------------------------------
+# 7. Stand-alone utility: simulate single SDE trajectory
+# --------------------------------------------------------------------------------------------------
 def simulate_trajectory(model, x0, sigma, time, dt, device):
     x0 = x0.requires_grad_(True)
     lnw0 = torch.log(torch.ones(x0.shape[0], 1, device=device, dtype=torch.float32) / x0.shape[0])
     initial_state = (x0, lnw0)
-    sigma=0.0
+
     class CytoSDE(torch.nn.Module):
         noise_type = "diagonal"
         sde_type = "ito"
-        def __init__(self, model, sigma=sigma):
+        def __init__(self, model, sigma=1.0):
             super().__init__()
             self.model = model
             self.sigma = sigma
@@ -330,6 +501,9 @@ def simulate_trajectory(model, x0, sigma, time, dt, device):
             t_expand = t.expand(z.shape[0], 1).to(dtype=z.dtype)
             vel_in = torch.cat([z, t_expand], 1)
             drift_z = self.model.velocity_net(vel_in)
+            if "score" in self.model.components:
+                score, gradients = self.model.compute_score(t, z)
+                drift_z += gradients
             if "growth" in self.model.components:
                 drift_lnw = self.model.growth_net(vel_in)
             else:
