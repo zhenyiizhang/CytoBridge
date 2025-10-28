@@ -13,6 +13,7 @@ def neural_ode_step(ODE_func, x0, lnw0, t0, t1, device):
     return x_t[-1], lnw_t[-1], e_t[-1]
 
 
+# TODO: add interaction results
 
 class ODEFunc(nn.Module):
 
@@ -36,9 +37,22 @@ class ODEFunc(nn.Module):
         else:
             g = torch.zeros(batch_size, 1, device=x.device)
 
+        if self.score_use and 'score' in outputs:
+            s = outputs['score']
 
-        v_norm_sq = torch.norm(v, p=2, dim=1, keepdim=True) ** 2
-        de_dt = (0.5 * v_norm_sq + g ** 2) * torch.exp(lnw)
+            grad_s = outputs['score_gradient']
+
+            v_norm_sq = torch.norm(v, p=2, dim=1, keepdim=True) ** 2
+            grad_s_norm_sq = torch.norm(grad_s, p=2, dim=1, keepdim=True) ** 2
+
+            de_dt = ( v_norm_sq / 2
+                     + grad_s_norm_sq / 2
+                     - (0.5 * self.sigma ** 2 * g + s * g)
+                     + g ** 2) * torch.exp(lnw)
+
+        else:
+            v_norm_sq = torch.norm(v, p=2, dim=1, keepdim=True) ** 2
+            de_dt = (0.5 * v_norm_sq + g ** 2) * torch.exp(lnw)
 
         dx_dt = v
         dlnw_dt = g

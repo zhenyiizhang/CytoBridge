@@ -11,6 +11,7 @@ ACTIVATION_FN = {
 
 
 class HyperNetwork(nn.Module):
+    # 
     def __init__(
             self,
             input_dim: int,
@@ -68,6 +69,7 @@ class HyperNetwork(nn.Module):
 
 
 
+
 class DynamicalModel(nn.Module):
     def __init__(
             self,
@@ -78,15 +80,14 @@ class DynamicalModel(nn.Module):
         self.latent_dim = latent_dim
         self.config = config
         self.components = config['components']
-        self.net_input_dim = self.latent_dim + 1  # 状态+时间（x + t）
+        self.net_input_dim = self.latent_dim + 1  # （x + t）
 
         for comp_name in self.components:
             net_name = f'{comp_name}_net'
             if net_name not in self.config:
                 raise ValueError(f"Configuration for component '{comp_name}' not found.")
 
-            comp_config = self.config[net_name].copy()  
-
+            comp_config = self.config[net_name].copy()  #
             if comp_name == 'velocity':
                 network = HyperNetwork(
                     input_dim=self.net_input_dim,
@@ -100,6 +101,13 @@ class DynamicalModel(nn.Module):
                     output_dim=1, **comp_config
                 )
 
+            elif comp_name == 'score':
+
+                network = HyperNetwork(
+                    input_dim=self.net_input_dim,
+                    output_dim=1,
+                    **comp_config
+                )
 
             # TODO: add interaction results
             else:
@@ -124,5 +132,33 @@ class DynamicalModel(nn.Module):
             net_input = torch.cat([x, t_expanded], dim=1)
             outputs['growth'] = self.growth_net(net_input)
 
+        # Handle score component
+        if 'score' in self.components:
+            x = x.requires_grad_(True)
+            net_input = torch.cat([x, t_expanded], dim=1)
+            out_score = self.score_net(net_input)
+            outputs['score'] = out_score
+            gradient = torch.autograd.grad(
+                outputs=out_score,
+                inputs=x,
+                grad_outputs=torch.ones_like(out_score),
+                create_graph=True
+            )[0]
+            outputs['score_gradient'] = gradient
 
         return outputs
+
+    def compute_score(self, t, x):
+        if t.dim() == 1:
+            t = t.unsqueeze(1)  # [batch_size] -> [batch_size, 1]
+        t_expanded = t.expand(x.size(0), 1)
+        x = x.requires_grad_(True)
+        net_input = torch.cat([x, t_expanded], dim=1)
+        out_score = self.score_net(net_input)
+        gradient = torch.autograd.grad(
+                outputs=out_score,
+                inputs=x,
+                grad_outputs=torch.ones_like(out_score),
+                create_graph=True
+            )[0]
+        return out_score, gradient

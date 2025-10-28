@@ -107,10 +107,8 @@ def preprocess(
     # --- Dimension Reduction ---
     # ---------- ：PCA | UMAP | none ----------
     if dim_reduction.lower() == 'pca':
-        # 1. 如果还没算过 PCA，就现场算
         if 'X_pca' not in adata.obsm:
             sc.pp.pca(adata, n_comps=n_pcs, svd_solver='arpack')
-        # 2. 把 PCA 结果当作“潜空间”
         adata.obsm['X_latent'] = adata.obsm['X_pca']
 
     elif dim_reduction.lower() == 'umap':
@@ -121,7 +119,6 @@ def preprocess(
         adata.obsm['X_latent'] = adata.obsm['X_umap']
 
     elif dim_reduction.lower() == 'none' or dim_reduction is None:
-        # 直接用原始表达矩阵
         adata.obsm['X_latent'] = adata.X
 
     else:

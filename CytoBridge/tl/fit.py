@@ -35,7 +35,7 @@ def fit(adata: sc.AnnData,
 
     # ---------- 3. auto batch-size ----------
     if batch_size is None:
-        batch_size = min(min(x.shape[0] for x in data_torch), 512)
+        batch_size = min(min(x.shape[0] for x in data_torch), 256)
 
     # ---------- 4. build & train model ----------
     dim = data_torch[0].shape[1]
@@ -54,6 +54,10 @@ def fit(adata: sc.AnnData,
     if 'growth' in model.components:
         growth = model.growth_net(net_input)
         adata.obsm['growth_rate'] = growth.detach().cpu().numpy()
+
+    if 'score' in model.components:
+        score = model.score_net(net_input)
+        adata.obsm['score_latent'] = score.detach().cpu().numpy()
 
     # ---------- 6. store model internals ----------
     adata.uns['all_model'] = {
