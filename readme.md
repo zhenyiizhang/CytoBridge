@@ -38,7 +38,28 @@ CytoBridge is currently under active development. The foundational framework is 
 
   * **Regularized Unbalanced OT (RUOT)**  (velocity + growth + stochasticity)
 
+## Roadmap
 
+We are continuously working to expand the capabilities of CytoBridge. Our development plan is as follows:
+
+  - [x] **Phase 1: Stochastic Dynamics & RUOT**
+
+    - [x] Implementation of the `score` component to model stochasticity.
+    - [x] Support for training methods based on the **Regularized Unbalanced Optimal Transport (RUOT)** frameworks.
+    - [ ] Integration of simulation-free training methods (e.g., Conditional Flow Matching, Velocity-growth Flow Matching).
+    - [x] Basic plotting functions and downstream analysis.
+
+  - [ ] **Phase 2: Advanced Modeling & Downstream Analysis**
+
+    - [ ] Implementation of the `interaction` component for modeling cell-cell communication.
+    - [ ] Advanced plotting functions and downstream analysis.
+
+
+  - [ ] **Phase 3: Spatiotemporal Dynamics**
+
+    - [ ] Support for time serise spatial transcriptomics data.
+    - [ ] Advanced plotting functions and downstream analysis.
+    - [ ] 
 ## Installation
 
 Currently, CytoBridge is in an early development stage. You can download it directly from this repository for testing and contribution:
@@ -120,7 +141,14 @@ adata.write_h5ad("results_with_model.h5ad")
 ## Detailed usage
 
 Please refer to CytoBridge/test.ipynb（demonstration） ,CytoBridge/evalutation/test1 (training) and CytoBridge/evalutation/test2(donestream analysis)
+## Update Log  
 
+**CytoBridge 1.1** (2025-10-29)  
+
+- `score` component released → stochastic dynamics ready  
+- RUOT pipeline stable under default hyper-params  (config/ruot)
+- New plots: velocity/score/V+S streams, 2-D score (density) and ODE/SDE trajectories.
+- evuluation and `test.ipynb` refreshed with downstream examples
 ## LICENSE
 
 CytoBridge is licensed under the GPL-3.0 License.
