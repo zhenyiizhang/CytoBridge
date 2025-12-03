@@ -33,10 +33,10 @@ The package is built to be modular, allowing users to easily combine these compo
 CytoBridge is currently under active development. The foundational framework is in place, and we have implemented the following models:
 
   * **Dynamical OT** (velocity)
-
   * **Unbalanced Dynamical OT** (velocity + growth)
-
   * **Regularized Unbalanced OT (RUOT)**  (velocity + growth + stochasticity)
+  * **Conditional RegularizedOT Unbalanced  Flow Matching (CRUFM)**  (velocity + growth + stochasticity)
+  * **CytoBridge**  (velocity + growth + stochasticity + interaction)
 
 ## Roadmap
 
@@ -46,108 +46,153 @@ We are continuously working to expand the capabilities of CytoBridge. Our develo
 
     - [x] Implementation of the `score` component to model stochasticity.
     - [x] Support for training methods based on the **Regularized Unbalanced Optimal Transport (RUOT)** frameworks.
-    - [ ] Integration of simulation-free training methods (e.g., Conditional Flow Matching, Velocity-growth Flow Matching).
+    - [x] Integration of simulation-free training methods (e.g., Conditional Flow Matching, Velocity-growth Flow Matching).
     - [x] Basic plotting functions and downstream analysis.
 
-  - [ ] **Phase 2: Advanced Modeling & Downstream Analysis**
-
-    - [ ] Implementation of the `interaction` component for modeling cell-cell communication.
-    - [ ] Advanced plotting functions and downstream analysis.
+  - [x] **Phase 2: Advanced Modeling & Downstream Analysis**
+- [x] Implementation of the `interaction` component for modeling cell-cell communication.
+    - [x] Advanced plotting functions and downstream analysis.
 
 
   - [ ] **Phase 3: Spatiotemporal Dynamics**
 
     - [ ] Support for time serise spatial transcriptomics data.
     - [ ] Advanced plotting functions and downstream analysis.
+Here’s a polished and reorganized version of your installation and usage instructions, with improved clarity and flow:
+
+---
+
 ## Installation
 
-Currently, CytoBridge is in an early development stage. You can download it directly from this repository for testing and contribution:
+CytoBridge is currently in developing stage. You can install it directly from the repository for testing and contribution:
 
+### Option 1: Install via pip  
+```bash
+pip install CytoBridge
+```
+
+### Option 2: Clone the Repository  
+1. Clone the Repository  
 ```bash
 git clone https://github.com/zhenyiizhang/CytoBridge.git
 ```
+2. We need to set up a  Conda environment to manage dependencies.Follow these steps:
+   
+   (1)Create and activate a new Conda environment
+   ```bash
+   conda create -n CytoBridge python=3.10 ipykernel -y
+   conda activate CytoBridge
+   ```
 
-*(A PyPI release is planned for the future.)*
+   (2)Navigate to the cloned repository
+   ```bash
+   cd path_to_CytoBridge
+   ```
 
-
+   (3)Install required packages 
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ## Basic Usage
 
-You can create a new conda environment (CytoBridge) and install required packages using
+CytoBridge supports both **h5ad** and **csv** inputs.  
+For a complete walk-through, see the web page :
 
-```vim
-conda create -n CytoBridge python=3.10 ipykernel -y
-conda activate CytoBridge
-cd path_to_CytoBridge
-pip install -r requirements.txt
-```
+Folloing are two examples's training process:
 
-**usage1** (for h5ad):
+---
 
-Here is a simple example of how to use CytoBridge, from preprocessing data to training a model and saving the results.
+### 1. Starting from an AnnData object (h5ad)
 
 ```python
 import scanpy as sc
 import cytobridge as cb
 import anndata as ad
 
-# 1. Load your data and preprocess
-# This assumes your adata object has an obs column for timepoints
-cb.pp.preprocess(adata, time_key = 'Time point', dim_reduction = 'PCA', normalization = True, log1p = True, select_hvg = True)
+# 1. Pre-process
+#    time_key: column in adata.obs that stores time-points
+cb.pp.preprocess(adata,
+                 time_key='Time point',
+                 dim_reduction='PCA',
+                 normalization=True,
+                 log1p=True,
+                 select_hvg=True)
 
-# 2. Train a model using a built-in configuration
-# The 'dynamical_ot' config uses the currently implemented 'velocity' components.
-# The 'unbalanced_ot' config uses the currently implemented 'velocity' and 'growth' components.
-# The 'RUOT' config uses the currently implemented 'velocity' and 'growth' components.
+# 2. Train
+#    dynamical_ot : velocity only
+#    unbalanced_ot: velocity + growth
+#    ruot         : velocity + growth + score (stochasticity) (RUOT mode)
+cb.tl.fit(adata, config='dynamical_ot', device='cuda')   # or 'cpu'
 
-# The `fit` function runs the entire training plan defined in the config.
-# The trained model and results are automatically saved to adata.uns['dynamic_model'], adata.obsm['velocity_latent'], adata.obsm['growth_rate']
-cb.tl.fit(adata, config='dynamical_ot', device='cuda')
-
-# 3. Save the AnnData object with the model for later use
+# 3. Save
 adata.write_h5ad("results_with_model.h5ad")
 ```
-**usage2** (for csv):
 
-Here is a simple example of how to use CytoBridge, from preprocessing data to training a model and saving the results.
+---
+
+### 2. Starting from a CSV file (gene-expression table)
 
 ```python
 import pandas as pd
 from anndata import AnnData
-import scanpy as sc
 import cytobridge as cb
 
-# 1. Load gene-expression table (rows = cells, columns = one “samples” column:cell_times  + gene expression martix)
-df = pd.read_csv('/lustre/home/2501111653/DeepRUOTv2_test_data/data/simulation_gene.csv')
+# 1. Load table: rows = cells, columns = gene counts + one "samples" (time) column
+df = pd.read_csv('simulation_gene.csv')
 
-# 2. Build the observations (obs) DataFrame: index = cell identifiers
+# 2. Separate metadata and expression
 obs = pd.DataFrame(index=df.index)
-obs['samples'] = df['samples'].values          # keep the cell_time in .obs
+obs['samples'] = df['samples'].astype(str)          # time information
+X = df.drop(columns=['samples']).values             # expression matrix
 
-# 3. Remove the non-expression column to obtain the pure expression matrix
-X = df.drop(columns=['samples']).values        # X: numpy array, genes × cells
-
-# 4. Create AnnData object
+# 3. Build AnnData
 adata = AnnData(X=X, obs=obs)
-# 5.  preprocess 
-adata = cb.pp.preprocess(adata, time_key = 'samples', dim_reduction = 'none', normalization = False, log1p = False, select_hvg = False)
-adata = cb.tl.fit(adata, config = 'ruot', device = 'cuda')
 
-# 3. Save the AnnData object with the model for later use
+# 4. Pre-process (skip built-in PCA/norm here because data are already transformed)
+cb.pp.preprocess(adata,
+                 time_key='samples',
+                 dim_reduction='none',
+                 normalization=False,
+                 log1p=False,
+                 select_hvg=False)
+
+# 5. Train
+cb.tl.fit(adata, config='ruot', device='cuda')
+
+# 6. Save
 adata.write_h5ad("results_with_model.h5ad")
 ```
 
+Both snippets return an `AnnData` object containing:
+- trained model: `adata.uns['dynamic_model']`  
+- latent velocity: `adata.obsm['velocity_latent']`  
+- growth rates: `adata.obsm['growth_rate']` (when applicable)
+
 ## Detailed usage
 
-Please refer to CytoBridge/test.ipynb（demonstration） ,CytoBridge/evalutation/test1 (training) and CytoBridge/evalutation/test2(donestream analysis)
+Please refer to webpage ：
 ## Update Log  
 
-**CytoBridge 1.1** (2025-10-29)  
+**CytoBridge 1.2** (2025-10-29)  
 
 - `score` component released → stochastic dynamics ready  
 - RUOT pipeline stable under default hyper-params  (config/ruot)
 - New plots: velocity/score/V+S streams, 2-D score (density) and ODE/SDE trajectories.
 - evuluation and `test.ipynb` refreshed with downstream examples
+
+**CytoBridge 1.3** (2025-11-25)  
+
+- `interaction` component released →  cell-cell communication. ready  
+- Conditional Flow Matching and  CytoBrigde (interaction) pipeline stable under default hyper-params  (config/ruot)
+- New plots: interaction_stream, interaction_potential, landscape , process_sde_classification and analyze_terminal_states
+-  `test` refreshed with downstream examples
+
+**CytoBridge 1.4** (2025-12-01)
+
+- **Debug and Optimization**: Improved preprocessing to better adapt to real-world datasets.
+- **Documentation Enhancements**: Refined the installation and guide to provide clearer instructions and better user guidance.
+
 ## LICENSE
 
 CytoBridge is licensed under the GPL-3.0 License.
