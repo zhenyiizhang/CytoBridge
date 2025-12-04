@@ -1,4 +1,4 @@
-sphinx
+sphinx>=6.0
 myst-nb
 furo
 ipython
