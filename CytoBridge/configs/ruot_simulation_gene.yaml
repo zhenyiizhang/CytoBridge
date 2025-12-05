@@ -1,0 +1,58 @@
+model:
+  components: ['velocity', 'growth', 'score'] 
+  velocity_net:
+    hidden_dim: 400
+    n_layers: 2
+    residual: false 
+    activation: 'relu'
+  growth_net:
+    hidden_dim: 400
+    n_layers: 2
+    residual: false
+    activation: 'relu'  
+  score_net:
+    hidden_dim: 128  
+    n_layers: 4      
+    activation: 'leaky_relu'  
+
+ckpt_dir: '/home/sjt/workspace2/CytoBridge_test-main_crufm/results/experiment_simulation'
+
+training:
+  defaults:
+    lr: 0.001  
+    lambda_ot: 10.0 
+    lambda_mass: 1.0  
+    lambda_energy: 0.01  
+    sigma: 0.05
+    batch_size: 256  #
+    scheduler_step_size: 100  
+    scheduler_gamma: 0.5  
+
+  plan:
+
+    - name: "Pretrain"
+      train_strategy: "v+g"
+      mode: "neural_ode"
+      epochs: 100
+      global_mass: True
+      OT_loss: 'sinkhorn'
+      lambda_ot: 10
+      lambda_mass: 10
+      lambda_energy: 0.01
+
+    - name: "Train_FM"
+      mode: "flow_matching"  
+      epochs: 3000
+      sigma: 0.05
+      train_strategy: "s"
+      scheduler_type: cosine
+      flow_matching:
+        lambda_penalty: 1
+
+    - name: "Finetune"
+      mode: "neural_ode"
+      train_strategy: "v+g+s"
+      lr: 0.0001  
+      epochs: 500
+      global_mass: True 
+      OT_loss: 'sinkhorn_detach'

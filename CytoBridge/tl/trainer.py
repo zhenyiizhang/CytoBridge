@@ -4,74 +4,55 @@ import pandas as pd
 import anndata as ad
 from tqdm import tqdm
 from CytoBridge.tl.methods import neural_ode_step, ODEFunc
-from CytoBridge.utils.utils import sample
-from CytoBridge.tl.losses import calc_ot_loss, calc_mass_loss, calc_score_matching_loss
+from CytoBridge.utils.utils import sample,trace_df_dz,compute_integral
+from CytoBridge.tl.losses import calc_ot_loss, calc_mass_loss, calc_score_matching_loss,Density_loss,calc_pinn_loss
 from CytoBridge.tl import methods
 from CytoBridge.tl.models import DynamicalModel
 from CytoBridge.tl.flow_matching import SchrodingerBridgeConditionalFlowMatcher, ConditionalRegularizedUnbalancedFlowMatcher, get_batch_size, compute_uot_plans, get_batch_uot_fm
-from CytoBridge.pl.plot import plot_score_and_gradient
+from CytoBridge.pl.plot import plot_interaction_potential_epoch
 from CytoBridge.tl.analysis import simulate_trajectory
 import math
 import os
 import ot
 from torchdiffeq import odeint
-from torch.optim.lr_scheduler import StepLR  # Import StepLR for learning rate decay
-
-
+from torch.optim.lr_scheduler import StepLR  # Import StepLR scheduler
 class TrainingPipeline:
-    """
-    A pipeline class to manage end-to-end training of dynamical models (e.g., DynamicalModel in CytoBridge).
-    It supports multiple training stages (Neural ODE, Flow Matching), parameter configuration, model saving,
-    and evaluation (Wasserstein distance calculation, trajectory simulation).
-    
-    Attributes:
-        model: The dynamical model to train (contains velocity_net, growth_net, score_net).
-        config: Training configuration dictionary (includes training plan, hyperparameters, save paths).
-        batch_size: Batch size for training.
-        device: Device (CPU/GPU) used for model training.
-        optimizer: PyTorch optimizer (e.g., Adam) for parameter updates.
-        scheduler: Learning rate scheduler (e.g., CosineAnnealingLR, StepLR) (optional).
-        ode_func: ODEFunc instance to unify gradient computation for Neural ODE.
-        use_mass: Boolean indicating if mass conservation (growth component) is enabled.
-        use_score: Boolean indicating if score matching component is enabled.
-        logger: Simple logger for training information output.
-        exp_dir: Experiment directory to save checkpoints and results.
-        df: DataFrame formatted from input data, used for score model training.
-        groups: Sorted unique time points (from df['samples']) for data grouping.
-    """
-    def __init__(self, model, config, batch_size, device, data):  # 
+    def __init__(self, model, config, batch_size, device, data):  # Added 'data' parameter for initialization
         self.model = model
         self.config = config
         self.batch_size = batch_size
         self.optimizer = None
-        self.scheduler = None  # Initialize scheduler as None (set later in stages)
+        self.scheduler = None  # Initialize scheduler variable
         self.device = device
-        self.model.to(device)  # Move model to the specified device
-
-        # Determine if mass conservation (growth) and score components are used
+        self.model.to(device)
+        # Determine if mass component is used based on model configuration
         self.use_mass = 'growth' in self.config['model']['components']
+        # Determine if score component is used based on model configuration
         self.use_score = 'score' in self.config['model']['components']
+        # Determine if interaction component is used based on model configuration
+        self.use_interaction = 'interaction' in self.config['model']['components']
 
-        # Initialize ODE function (unified entry for gradient computation)
+        # Initialize ODE function (unified gradient calculation entry)
         self.ode_func = ODEFunc(
             model=self.model,
-            sigma=config['training']['defaults'].get('sigma', 0.05),  # Noise scale (default: 0.05)
+            sigma=config['training']['defaults'].get('sigma', 0.05),
             use_mass=self.use_mass,
-            score_use=self.use_score
+            score_use=self.use_score,
+            interaction_use=self.use_interaction
         )
 
         # New: Initialize variables required for train_score_model
-        self.logger = self._setup_logger()  # Create a simple logger (replaces external logger)
-        self.exp_dir = self.config.get('ckpt_dir', './results')  # Get experiment dir from config (default: ./results)
-        os.makedirs(self.exp_dir, exist_ok=True)  # Create dir if it doesn't exist
-        self.df = self._prepare_df(data)  # Format input data into DataFrame
-        self.groups = sorted(self.df.samples.unique())  # Get sorted unique time points
+        self.logger = self._setup_logger()  # Simple logger implementation
+        # Get experiment directory from configuration (default to './results' if not specified)
+        self.exp_dir = self.config.get('ckpt_dir', './results')
+        os.makedirs(self.exp_dir, exist_ok=True)
+        # Construct DataFrame from input data to fit the format required by train_score_model
+        self.df = self._prepare_df(data)
+        # Get sorted list of unique time points (grouped by 'samples' column)
+        self.groups = sorted(self.df.samples.unique())
 
     def _setup_logger(self):
-        """
-        Create a simple logger class to replace external logger dependencies.
-        Only supports INFO-level messages (printed to console with [INFO] prefix).
-        """
+        """Simple logger implementation to replace the original logger"""
 
         class SimpleLogger:
             @staticmethod
@@ -81,131 +62,146 @@ class TrainingPipeline:
         return SimpleLogger()
 
     def _prepare_df(self, data):
-        """
-        Format input time-series data into a DataFrame for score model training.
+        """Construct DataFrame from input data to fit the format required by train_score_model
         
         Args:
-            data: A list of tensors, where each tensor represents samples at a single time point (shape: n_samples × 2).
+            data: List of tensors where each element represents samples at a specific time point (shape: n_samples×2)
         
         Returns:
-            pd.DataFrame: Combined DataFrame with columns 'x1' (1st feature), 'x2' (2nd feature), 
-                          and 'samples' (time point, stored as float64).
+            pd.DataFrame: Combined DataFrame with columns 'x1', 'x2', and 'samples' (time point)
         """
         all_samples = []
         for t_idx, x in enumerate(data):
-            x_np = x.cpu().detach().numpy()  # Convert tensor to NumPy array
-            # Create DataFrame for the current time point
+            x_np = x.cpu().detach().numpy()  # Convert tensor to numpy array
+            # Construct DataFrame for current time point: columns = [x1, x2, samples (time point)]
             df_t = pd.DataFrame({
-                'x1': x_np[:, 0],  # 1st dimension of samples
-                'x2': x_np[:, 1],  # 2nd dimension of samples
-                'samples': np.full(x_np.shape[0], t_idx, dtype=np.float64)  # Time point (float64 for consistency)
+                'x1': x_np[:, 0],
+                'x2': x_np[:, 1],
+                # Assign current time point to all samples (dtype: float64 for consistency)
+                'samples': np.full(x_np.shape[0], t_idx, dtype=np.float64)
             })
             all_samples.append(df_t)
-        return pd.concat(all_samples, ignore_index=True)  # Combine all time points into one DataFrame
+        # Concatenate DataFrames from all time points and reset index
+        return pd.concat(all_samples, ignore_index=True)
 
     # --------------------------
-    # Main Modification: Optimizer and Scheduler Setup
+    # Main Modifications: Optimizer and Scheduler Setup
     # --------------------------
     def _setup_stage(self, stage_params):
-        """
-        Configure optimizer, learning rate scheduler, and parameter gradient flags for the current training stage.
-        
-        Args:
-            stage_params: Dictionary of parameters for the current stage (includes lr, scheduler type, score_use, etc.).
-        """
-        lr = stage_params['lr']  # Get learning rate for the stage
+        lr = stage_params['lr']
         print(f"\n====  {stage_params['name']}  ====")
 
-        # Determine if score_net and its Flow Matching mode are enabled
-        score_use = stage_params.get('score_use', False)
-        score_fm_use = stage_params.get('score_train', False)
+        # Get flags for score network training from stage parameters
+        train_strategy = str(stage_params.get('train_strategy', '')).lower()
+
+
+
+        if not train_strategy or train_strategy == 'none':
+            use_v = train_g = use_s = use_i = True          # 缺省策略：全训练
+        else:
+            use_v, train_g, use_s, use_i = 'v' in train_strategy, 'g' in train_strategy, 's' in train_strategy, 'i' in train_strategy
+
+        if stage_params.get('mode') ==  "neural_ode":
+            train_s = False
+            if use_v and use_s and use_i:
+                train_s = True
+            self.model.use_growth_in_ode_inter = stage_params.get('use_growth_in_ode_inter', True)
+            self.ode_func.use_mass = self.model.use_growth_in_ode_inter
+            self.ode_func.score_use = train_strategy is not None and 's' in train_strategy
+            self.ode_func.interaction_use = train_strategy is not None and 'i' in train_strategy
+
+        elif stage_params.get('mode') ==  "flow_matching":
+            train_s = True
+        else:
+            raise ValueError(f"Unknown training mode: {stage_params['mode']}")
 
         # Collect trainable parameters based on component flags
         params = []
-        for name, module in self.model.named_children():
-            if name == 'score_net':
-                # Enable gradients for score_net only if both score_use and score_fm_use are True
-                if score_use and score_fm_use:
-                    for p in module.parameters():
-                        p.requires_grad = True
-                        params.append(p)
-                else:
-                    # Disable gradients for score_net
-                    for p in module.parameters():
-                        p.requires_grad = False
 
-            else:
-                # Enable gradients for other modules (e.g., velocity_net, growth_net)
+        for name, module in self.model.named_children():
+            # print(f"Name: {name}")
+            # print(f"Module: {module}")
+            # print(f"Module type: {type(module)}")
+            # print("Parameters:")
+            if (name == 'velocity_net' and use_v) or (name == 'growth_net' and train_g) or  (name == 'score_net' and train_s) or (name == 'interaction_net'  and use_i):
                 for p in module.parameters():
                     p.requires_grad = True
                     params.append(p)
-        
-        # Initialize Adam optimizer (filter out parameters with no gradients)
+                    # print(f"  Parameter shape: {p.shape}")
+                    # print(f"  Parameter requires_grad: {p.requires_grad}")
+                print("-" * 50)
+            else:
+
+                for p in module.parameters():
+                    p.requires_grad = False
+                    # print(f"  Parameter shape: {p.shape}")
+                    # print(f"  Parameter requires_grad: {p.requires_grad}")
+        # Initialize Adam optimizer with only trainable parameters
         self.optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, params), lr=lr
         )
 
-        self.scheduler = None  # Reset scheduler for the new stage
+        # Reset scheduler before setting up new one
+        self.scheduler = None
         if 'scheduler_type' in stage_params:
-            # Configure CosineAnnealingLR scheduler
             if stage_params['scheduler_type'] == 'cosine':
-                cosine_epochs = stage_params.get('cosine_epochs', 3000)  # Default: 3000 epochs
+                # Use Cosine Annealing scheduler if specified
+                cosine_epochs = stage_params.get('cosine_epochs', 1000)
                 self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                     self.optimizer, 
-                    T_max=cosine_epochs,  # Maximum number of iterations
+                    T_max=cosine_epochs, 
                     eta_min=1e-5  # Minimum learning rate
                 )
-
-            # Configure StepLR scheduler
             elif stage_params['scheduler_type'] == 'steplr':
+                # Use StepLR scheduler if specified
                 self.scheduler = StepLR(
                     optimizer=self.optimizer,
-                    step_size=stage_params['scheduler_step_size'],  # Epochs between lr decays
-                    gamma=stage_params['scheduler_gamma']  # Decay factor
+                    step_size=stage_params['scheduler_step_size'],
+                    gamma=stage_params['scheduler_gamma']  # Learning rate decay factor
                 )
                 print(f"  Enabled learning rate scheduler: step_size={stage_params['scheduler_step_size']}, gamma={stage_params['scheduler_gamma']}")
         else:
-            print("  No scheduler configured; learning rate remains constant")
+            print("  No scheduler parameters configured - keeping learning rate constant")
 
-        # Print gradient status for each model component
+        # Print gradient status (trainable/non-trainable) for each module
         for n, m in self.model.named_children():
             flag = any(p.requires_grad for p in m.parameters())
             print(f"  {n:<15}  grad={flag}")
-        # Print shapes of trainable parameters (for verification)
-        print("  Optimizer parameters: ", [p.shape for g in self.optimizer.param_groups for p in g['params']])
+        # Print shapes of parameters in optimizer
+        print("  Optimizer parameters (shapes):", [p.shape for g in self.optimizer.param_groups for p in g['params']])
 
     def train(self, data, time_points):
-        """
-        Main training entry point: execute each stage in the training plan sequentially.
+        """Main training loop that executes multiple training stages based on configuration
         
         Args:
-            data: List of tensors, each representing samples at a time point (shape: n_samples × 2).
-            time_points: List of time values corresponding to the data list.
+            data: List of tensors where each element represents samples at a specific time point
+            time_points: List of time values corresponding to each element in 'data'
         
         Returns:
-            The trained dynamical model.
+            DynamicalModel: Trained model
         """
-        training_plan = self.config['training']['plan']  # Get list of training stages
-        base_defaults = self.config['training']['defaults']  # Get base hyperparameters
+        # Get training plan and base default parameters from configuration
+        training_plan = self.config['training']['plan']
+        base_defaults = self.config['training']['defaults']
 
+        # Execute each stage in the training plan
         for stage_config in training_plan:
-            # Merge base defaults with stage-specific parameters (stage params override defaults)
+            # Merge base defaults with stage-specific config (stage config takes priority)
             stage_params = base_defaults.copy()
             stage_params.update(stage_config)
             stage_name = stage_params['name']
 
+
             print(f"\n--- Starting Stage: {stage_name} ---")
             print(
                 f"  Mode: {stage_params['mode']}, Epochs: {stage_params['epochs']}, Use Score: {stage_params.get('score_use', False)}")
+            train_strategy = stage_params.get('train_strategy', None)
 
-            # 1. Update ODE function parameters (ensure latest stage config is applied)
-            self.ode_func.score_use = stage_params.get('score_use', False)
-            self.ode_func.score_flow_matching_use = stage_params.get('score_train', False)
 
-            # 2. Critical Fix: Configure optimizer/scheduler for ALL stages (ensures gradient flags are applied)
+            # Setup optimizer, scheduler, and trainable parameters for current stage
             self._setup_stage(stage_params)
 
-            # 3. Execute training for the current stage mode
+            # Execute stage training based on mode
             if stage_params['mode'] == 'neural_ode':
                 self.run_neural_ode_stage(stage_params, data, time_points)
             elif stage_params['mode'] == 'flow_matching':
@@ -216,397 +212,377 @@ class TrainingPipeline:
         return self.model
 
     def run_neural_ode_stage(self, stage_params, data, time_points):
-        """
-        Execute the Neural ODE training stage: manage epoch loop, best model tracking, and model saving.
+        """Execute training stage using Neural ODE mode
         
         Args:
-            stage_params: Stage-specific parameters (epochs, save_strategy, loss weights, etc.).
-            data: List of tensors for each time point.
-            time_points: List of time values corresponding to data.
+            stage_params: Dictionary of parameters for current stage (epochs, loss weights, etc.)
+            data: List of tensors where each element represents samples at a specific time point
+            time_points: List of time values corresponding to each element in 'data'
         """
         epochs = stage_params['epochs']
-        # Get save strategy (default: save the best model based on loss)
+        # Get model saving strategy (default to 'best' if not specified)
         save_strategy = stage_params.get('save_strategy', 'best')
 
-        self._setup_stage(stage_params)  # Re-initialize stage (redundant but safe for consistency)
 
-        best_loss = float('inf')  # Track the lowest loss for best model selection
-        best_state = self.model.state_dict()  # Store weights of the best model
-        
+        # Initialize variables for tracking best model
+        best_loss = float('inf')
+        best_state = self.model.state_dict()
+        train_strategy = stage_params.get('train_strategy', None)
+        train_name=stage_params["name"]
+
+        # Training loop over epochs
         for epoch in range(epochs):
-            # Compute loss for one epoch of Neural ODE training
+            # Calculate loss for one epoch of Neural ODE training
             loss = self.train_neural_ode_epoch(stage_params, data, time_points, self.ode_func)
 
             # Print progress every 10 epochs
             if epoch % 10 == 0:
                 print(f"  Stage '{stage_params['name']}', Epoch {epoch + 1}/{epochs}, Loss: {loss:.4f}")
+            # if epoch % 10 == 0 and self.use_interaction:
+            #     plot_interaction_potential_epoch(self.model,d=1,num_points=40,output_path=self.config["ckpt_dir"]+f"/interfigures/{train_name}_epoch_{epoch}_inter",device="cuda")
+            #     if epoch < 15:
+            #         print(f"{train_name} plot_interaction_potential_epoch {epoch} has done")
 
-            # Update best model if current loss is lower
+            # if "i" in train_strategy:
+            #     if epoch % 10 == 0:
+            #         plot_interaction_potential_epoch(self.model,d=1,num_points=21,output_path=self.config["ckpt_dir"]+f"/interfigures/{train_name}_epoch_{epoch}_inter",device="cuda")
+            #         print(f"{train_name} plot_interaction_potential_epoch {epoch} has done")
+            # Update best model if current loss is lower than previous best
             if loss < best_loss:
                 best_loss = loss
                 self.logger.info(f"Epoch {epoch:3d} has a lower loss| all_loss {best_loss:.4f}")
-                best_state = self.model.state_dict()  # Save new best weights
+                best_state = self.model.state_dict()
 
-        # Select which model state to save (best or last)
+        # Determine which model state to save (best or last)
         if save_strategy == 'best':
             save_state = best_state
             save_loss = best_loss
-        else:  # 'last' strategy: save the model from the final epoch
+        else:  # 'last' strategy
             save_state = self.model.state_dict()
-            # Recompute loss for the final epoch (to ensure accuracy)
+            # Recalculate loss for last epoch to ensure accuracy
             last_loss = self.train_neural_ode_epoch(stage_params, data, time_points, self.ode_func)
             save_loss = last_loss
 
-        # Load the selected state (best/last) and save to disk
+        # Load saved state (best or last) back to model
         self.model.load_state_dict(save_state)
-        ckpt_dir = os.path.join(self.config.get('ckpt_dir', '.'), stage_params['name'])  # Checkpoint dir for the stage
+        # Create checkpoint directory for current stage
+        ckpt_dir = os.path.join(self.config.get('ckpt_dir', '.'), stage_params['name'])
         os.makedirs(ckpt_dir, exist_ok=True)
-        # Determine checkpoint filename (fix: use 'best_model.pth' for 'best' strategy, 'last_model.pth' otherwise)
-        ckpt_filename = 'best_model.pth' if save_strategy == 'best' else 'last_model.pth'
+        # Define checkpoint filename based on save strategy
+        ckpt_filename = 'best.pth' if save_strategy == 'best_model' else 'last_model.pth'
         torch.save(save_state, os.path.join(ckpt_dir, ckpt_filename))
-        print(f"  {save_strategy.capitalize()} model (loss={save_loss:.4f}) saved → {ckpt_dir}/{ckpt_filename}")
+        print(f"  {save_strategy.capitalize()} model (loss={save_loss:.4f}) saved → {ckpt_dir}/{save_strategy}.pth")
 
     def train_neural_ode_epoch(self, stage_params, data, time_points, ode_func):
-        """
-        Train one epoch of the Neural ODE model: compute loss (OT, mass, energy) and update parameters.
+        """Calculate loss for one epoch of Neural ODE training
         
         Args:
-            stage_params: Stage-specific parameters (loss weights, OT type, etc.).
-            data: List of tensors for each time point.
-            time_points: List of time values corresponding to data.
-            ode_func: ODEFunc instance for Neural ODE step computation.
+            stage_params: Dictionary of parameters for current stage (loss weights, etc.)
+            data: List of tensors where each element represents samples at a specific time point
+            time_points: List of time values corresponding to each element in 'data'
+            ode_func: ODEFunc instance for computing ODE updates
         
         Returns:
-            float: Average loss over all time intervals (normalized by number of intervals).
+            float: Average loss over all time intervals
         """
         # Get loss weights and configuration from stage parameters
-        lambda_ot = stage_params['lambda_ot']  # Weight for OT loss
-        lambda_mass = stage_params['lambda_mass']  # Weight for mass loss
-        lambda_energy = stage_params['lambda_energy']  # Weight for energy loss
-        global_mass = stage_params['global_mass']  # Flag for global mass conservation
-        OT_loss_type = stage_params['OT_loss']  # Type of OT loss (e.g., 'emd', 'sinkhorn')
+        lambda_ot = stage_params['lambda_ot']
+        lambda_mass = stage_params['lambda_mass']
+        lambda_energy = stage_params['lambda_energy']
+        
+        OT_loss_type = stage_params['OT_loss']
+        use_density_loss = stage_params.get('use_density_loss', False)
+        use_pinn_loss = stage_params.get('use_pinn_loss', False)
+
+        global_mass = stage_params.get('global_mass', False)
+        if use_density_loss:
+            if 'density_top_k' not in stage_params or 'lambda_density' not in stage_params or 'density_hinge_value' not in stage_params:
+                raise ValueError(
+                    "When use_density_loss=True, all 'density_top_k','lambda_density' and 'density_hinge_value' "
+                    "must be provided in stage_params.(Default recommended ( 5 , 10 and  0.01))" 
+                )            
+            top_k = stage_params['density_top_k']
+            hinge_value = stage_params['density_hinge_value']
+            lambda_density = stage_params['lambda_density']
+            density_fn = Density_loss(hinge_value)
+
 
         # Initialize with sampled data from the first time point
-        x0 = sample(data[0], self.batch_size).to(self.device)  # Initial samples (batch size)
-        # Initial log-weights (uniform distribution: ln(1/batch_size))
+        x0 = sample(data[0], self.batch_size).to(self.device)
+        # Initialize log-weights (uniform distribution)
         lnw0 = torch.log(torch.ones(self.batch_size, 1) / self.batch_size).to(self.device)
-        mass_0 = data[0].shape[0]  # Total number of samples at t=0 (for relative mass calculation)
+        # Total number of samples at the first time point
+        mass_0 = data[0].shape[0]
 
         total_loss = 0.0
-        # Iterate over each time interval (t0 → t1)
+        # Iterate over all time intervals (from t_{i-1} to t_i)
         for idx in range(1, len(time_points)):
-            self.optimizer.zero_grad()  # Reset gradients
+            # Reset gradients before each time interval update
+            self.optimizer.zero_grad()
 
-            t0, t1 = time_points[idx - 1], time_points[idx]  # Current time interval
-            data_t1 = sample(data[idx], self.batch_size).to(self.device)  # Samples at t1 (batch size)
-            mass_1 = data[idx].shape[0]  # Total samples at t1
-            relative_mass = mass_1 / mass_0  # Relative mass change between t0 and t1
+            # Get current time interval and target data
+            t0, t1 = time_points[idx - 1], time_points[idx]
+            data_t1 = sample(data[idx], self.batch_size).to(self.device)
+            # Total number of samples at the target time point
+            mass_1 = data[idx].shape[0]
+            # Calculate relative mass ratio between target and initial time points
+            relative_mass = mass_1 / mass_0
 
-            # Compute Neural ODE step: predict (x1, lnw1, energy) at t1 from t0
+            # Perform one Neural ODE step to predict state at t1
             x1, lnw1, e1 = neural_ode_step(ode_func, x0, lnw0, t0, t1, self.device)
 
-            # Calculate individual losses
-            loss_ot = calc_ot_loss(x1, data_t1, lnw1, OT_loss_type)  # OT loss (predicted vs real samples)
-            # Mass loss (only if mass conservation is enabled)
+            # Calculate individual loss components
+            loss_ot = calc_ot_loss(x1, data_t1, lnw1, OT_loss_type)
+            # Calculate mass loss only if mass component is enabled
             loss_mass = calc_mass_loss(x1, data_t1, lnw1, relative_mass, global_mass) if self.use_mass else 0.0
-            loss_energy = e1.mean()  # Average energy loss from ODE step
+            # Energy loss (average of energy term from ODE step)
+            loss_energy = e1.mean()
 
-            # Total loss (weighted sum of individual losses)
+            # Combine losses with respective weights
             loss = (lambda_ot * loss_ot) + (lambda_mass * loss_mass) + (lambda_energy * loss_energy)
 
-            loss.backward()  # Backpropagate gradients
-            self.optimizer.step()  # Update model parameters
+            if use_density_loss:          
+                density_loss = density_fn(x1, data_t1, top_k=top_k)
+                density_loss = density_loss.to(loss.device)
+                loss += lambda_density * density_loss
+                # print('density loss')
+                # print(density_loss)
+            if use_pinn_loss: 
+                if 'lambda_pinn'  not in stage_params:
+                    raise ValueError(
+                        "When use_pinn_loss=True, 'lambda_pinn' must be provided in stage_params.(Default recommended (100))" 
+                    )            
+                lambda_pinn = stage_params['lambda_pinn'] 
+
+                loss_pinn = calc_pinn_loss(self, t1, data_t1,sigma=stage_params['sigma'], use_mass=self.use_mass,trace_df_dz=trace_df_dz,device=self.device)
+                # print("loss_pinn",loss_pinn)
+                # print("loss",loss)
+                loss += lambda_pinn * loss_pinn
+            # print(f"OT Loss: {loss_ot:.4f} (λ={lambda_ot}), Mass Loss: {loss_mass:.4f} (λ={lambda_mass}), Energy Loss: {loss_energy:.4f} (λ={lambda_energy}), Density Loss: {density_loss:.4f} (λ={lambda_density})" if use_density_loss else f"OT Loss: {loss_ot:.4f} (λ={lambda_ot}), Mass Loss: {loss_mass:.4f} (λ={lambda_mass}), Energy Loss: {loss_energy:.4f} (λ={lambda_energy})", end="")
+            # if use_pinn_loss:
+            #     print(f", PINN Loss: {loss_pinn:.4f} (λ={lambda_pinn})")
+            # Backpropagate gradients and update optimizer
+            loss.backward()
+            self.optimizer.step()
 
             # Update initial state for next time interval (detach to avoid gradient accumulation)
             x0 = x1.clone().detach()
             lnw0 = lnw1.clone().detach()
 
-            total_loss += loss.item()  # Accumulate loss over all intervals
+            # Accumulate total loss over all time intervals
+            total_loss += loss.item()
 
         # Return average loss per time interval
         return total_loss / (len(time_points) - 1)
 
 
     def run_flow_matching_stage(self, stage_params, data, time_points):
-        """
-        Execute the Flow Matching training stage: compute UOT plans, initialize Flow Matcher,
-        run epoch loop, and save the model.
+        """Execute training stage using Flow Matching mode
         
         Args:
-            stage_params: Stage-specific parameters (epochs, sigma, regularization, etc.).
-            data: List of tensors for each time point.
-            time_points: List of time values corresponding to data.
+            stage_params: Dictionary of parameters for current stage (epochs, sigma, etc.)
+            data: List of tensors where each element represents samples at a specific time point
+            time_points: List of time values corresponding to each element in 'data'
         """
-        # Create checkpoint directory for the Flow Matching stage
+        # Create checkpoint directory for current stage
         ckpt_dir = os.path.join(self.config.get('ckpt_dir', '.'), stage_params['name'])
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        # Remove pretrained model loading (ensure each component works independently)
-
-        # # ---------- 1. Load pretrained weights (non-score components) ----------
-        # # Get save strategy of the previous stage (default: 'best')
-        # prev_stage   = stage_params.get('prev_stage', 'Pretrain')
-        # prev_save_as = self.config.get('training', {})\
-        #                         .get(prev_stage, {})\
-        #                         .get('save_strategy', 'best')          
-        # prev_ckpt_fn = 'best_model.pth' if prev_save_as == 'best' else 'last_model.pth'
-        # best_prev_path = os.path.join(self.config.get('ckpt_dir', '.'), prev_stage, prev_ckpt_fn)
-
-        # if os.path.exists(best_prev_path):
-        #     self.model.load_state_dict(torch.load(best_prev_path, map_location=self.device))
-        #     self.logger.info(f"Loaded pretrained model from {best_prev_path}")
-        # else:
-        #     self.logger.info(f"No pretrained checkpoint found at {best_prev_path}, train from scratch.")
-
-        # Convert time points to tensor (for Flow Matching computations)
+        # Convert time points to tensor (device-compatible)
         time = torch.tensor(time_points, device=self.device, dtype=torch.float32)
-        sigma = stage_params['sigma']  # Noise scale for Flow Matching
-        alpha_regm = stage_params.get('alpha_regm', 1.0)  # Regularization parameter for UOT
-        self.sigma = sigma  # Store sigma as instance attribute (for evaluation)
-        # Convert data to list of NumPy arrays (required for compute_uot_plans)
+        # Get sigma parameter for Flow Matching
+        sigma = stage_params['sigma']
+        # Get alpha regularization parameter (default to 1.0 if not specified)
+        alpha_regm = stage_params.get('alpha_regm', 1.0)
+        print("alpha_regm :", alpha_regm)
+        self.sigma = sigma
+        # Convert data to list of numpy arrays (required for compute_uot_plans)
         X = [data[i].float().cpu().detach().numpy() for i in range(len(time_points))]
         
-        # Compute UOT (Unbalanced Optimal Transport) plans
-        regress_g = stage_params.get('g_train', False)  # Flag for growth net training
-        if regress_g:
-            # Compute UOT plans with alpha regularization (for growth net)
-            uot_plans, sampling_info = compute_uot_plans(
-                X, time_points, 
-                use_mini_batch_uot=True, 
-                chunk_size=1000, 
-                alpha_regm=alpha_regm, 
-                reg_strategy='per_time'
-            )
-        else:
-            # Compute UOT plans without alpha regularization
-            uot_plans, sampling_info = compute_uot_plans(
-                X, time_points, 
-                use_mini_batch_uot=True, 
-                chunk_size=2000, 
-                reg_strategy='per_time'
-            )
-
-
-
-        # def rebuild_uot_plan(sampling_info: dict):
-        #     """
-        #     Reconstruct the full UOT plan matrix from chunked sub-plans (from sampling_info).
-            
-        #     Args:
-        #         sampling_info: Dictionary containing chunked source/target indices and sub-plans.
-            
-        #     Returns:
-        #         np.ndarray: Full UOT plan matrix (shape: n_source × n_target).
-        #     """
-        #     # Calculate total number of source and target samples
-        #     n_source = sum(len(src_idx) for src_idx in sampling_info['source_groups'])
-        #     n_target = sum(len(tgt_idx) for tgt_idx in sampling_info['target_groups'])
-
-        #     G = np.zeros((n_source, n_target), dtype=np.float32)  # Initialize full plan matrix
-        #     # Fill sub-plans into the full matrix using indices
-        #     for src_idx, tgt_idx, sub_plan in zip(
-        #         sampling_info['source_groups'],
-        #         sampling_info['target_groups'],
-        #         sampling_info['sub_plans']
-        #     ):
-        #         G[np.ix_(src_idx, tgt_idx)] = sub_plan
-        #     return G
-
-        # # Store reconstructed UOT plans (order matches uot_plans)
-        # uot_plans_rebuilt = []
-
-        # for si in sampling_info:  # si is either None (full matrix) or a dict (chunked)
-        #     if si is None:  # UOT plan was computed as a full matrix
-        #         uot_plans_rebuilt.append(None)
-        #     else:  # UOT plan was chunked: reconstruct full matrix
-        #         G = rebuild_uot_plan(si)  # Pass only the dict (si)
-        #         uot_plans_rebuilt.append(G)
-
-        # # Calculate row sums of reconstructed UOT plans (for verification)
-        # row_sums = []
-        # for mat in uot_plans_rebuilt:  # mat is np.ndarray (shape: n_i × n_j)
-        #     row_sum = mat.sum(axis=1)  # Sum of each row (shape: n_i,)
-        #     sum12 = row_sum.sum()  # Total sum of all rows
-        #     mean12 = row_sum.mean()  # Average row sum
-
-        #     row_sums.append(row_sum)
-
+        # Get flags for training different network components
+        train_strategy = str(stage_params.get('train_strategy', 's')).lower()
+        regress_v, regress_g, regress_score = 'v' in train_strategy, 'g' in train_strategy, 's' in train_strategy
+        
+        if regress_g or regress_v :
+            uot_plans, sampling_info = compute_uot_plans(X, time_points,use_mini_batch_uot=True, chunk_size=1000, alpha_regm= alpha_regm ,reg_strategy="max_over_time")
+        else :
+            uot_plans, sampling_info = compute_uot_plans(X, time_points,use_mini_batch_uot=True, chunk_size=2000,reg_strategy='per_time')
 
         # Initialize Conditional Regularized Unbalanced Flow Matcher
         FM = ConditionalRegularizedUnbalancedFlowMatcher(sigma=sigma)
-        save_strategy = stage_params.get('save_strategy', 'best')  # Save strategy for the stage
-        best_loss = float('inf')  # Track lowest loss for best model
-        best_state_dict = None  # Store weights of the best model
+        # Get model saving strategy (default to 'best' if not specified)
+        save_strategy = stage_params.get('save_strategy', 'best')
+        # Initialize variables for tracking best model
+        best_loss = float('inf')
+        best_state_dict = None
         
-        batch_size = stage_params['batch_size']  # Batch size for Flow Matching
+        # Get batch size from stage parameters
+        batch_size = stage_params['batch_size']
 
-        # Flags for training different model components
-        regress_v = stage_params.get('v_train', False)  # Velocity net training flag
-        regress_g = stage_params.get('g_train', False)  # Growth net training flag
-        regress_score = stage_params.get('score_train', True)  # Score net training flag
 
-        # Epoch loop for Flow Matching (with tqdm progress bar)
+
+        # Training loop over epochs (with tqdm progress bar)
         for epoch in tqdm(range(stage_params['epochs']), desc='Flow matching'):
-            # Compute loss and penalty for one Flow Matching epoch
+            # Calculate loss for one epoch of Flow Matching training
             loss, penalty = self.train_flow_matching_epoch(
                 FM, X, time,
                 self.optimizer,
-                stage_params['flow_matching']['lambda_penalty'],  # Penalty weight for score net
+                stage_params['flow_matching']['lambda_penalty'],
                 batch_size,
                 uot_plans,
                 sampling_info,
                 regress_v, regress_g, regress_score,
             )
 
-            # Stop training if loss is NaN (numerical instability)
+            # Stop training if loss becomes NaN (numerical instability)
             if torch.isnan(loss):
                 self.logger.info("Training stopped due to NaN loss")
-                self.model.load_state_dict(best_state_dict)  # Revert to best model
+                # Load best model state before NaN occurred
+                self.model.load_state_dict(best_state_dict)
                 break
 
-            # Update best model if current loss is lower
+            # Update best model if current loss is lower than previous best
             if loss < best_loss:
                 best_loss = loss
-                best_state_dict = self.model.state_dict().copy()  # Save new best weights
+                best_state_dict = self.model.state_dict().copy()
 
-            # # ---- Log progress ----
-            # if epoch % 2999 == 0:
-            #     current_lr = self.optimizer.param_groups[0]['lr']
-            #     print(f"penalty: {penalty}")
-            #     print(f"Iteration {epoch}: loss = {loss.item():.4f}, LR: {current_lr:.6f}")
-            #     self._plot_snapshot(epoch, stage_params, data, time_points, "figures")
+            # Combine loss and penalty for backpropagation
+            total_loss = loss + penalty
+            # print("score_loss",loss)
+            # print("penalty",penalty)
 
-            # ---- Backward pass and parameter update ----
-            total_loss = loss + penalty  # Total loss (loss + penalty)
-            total_loss.backward()  # Backpropagate gradients
-            self.optimizer.step()  # Update model parameters
+            total_loss.backward()
+            # Update optimizer
+            self.optimizer.step()
+            # Update scheduler if initialized
             if self.scheduler is not None:
-                self.scheduler.step()  # Update learning rate (if scheduler exists)
+                self.scheduler.step()
 
-        # ---------- 5. Save model based on strategy ----------
+        # Determine which model state to save (best or last)
         if save_strategy == 'best':
             save_state = best_state_dict
             save_loss = best_loss
-        else:  # 'last' strategy: save final epoch model
+        else:  # 'last' strategy
             save_state = self.model.state_dict()
-            save_loss = loss.item() + penalty.item()  # Total loss of final epoch
+            save_loss = loss.item() + penalty.item()
 
-        # Load selected state (best/last) and save to disk
+        # Load saved state (best or last) back to model
         self.model.load_state_dict(save_state)
+        # Define checkpoint filename based on save strategy
         ckpt_filename = 'best_model.pth' if save_strategy == 'best' else 'last_model.pth'
         torch.save(save_state, os.path.join(ckpt_dir, ckpt_filename))
         print(f"  {save_strategy.capitalize()} model (loss={save_loss:.4f}) "
-              f"saved → {ckpt_dir}/{ckpt_filename}")
+              f"saved → {ckpt_dir}/{save_strategy}_model.pth")
 
     def train_flow_matching_epoch(self, FM, X, time,
-                             optimizer, lambda_pen, batch_size, uot_plans, sampling_info, regress_v, regress_g, regress_score):
-        """
-        Train one epoch of the Flow Matching model: sample batches, compute lambda(t),
-        predict model outputs (score, velocity, growth), and calculate loss/penalty.
+                                  optimizer, lambda_pen, batch_size, uot_plans, sampling_info, regress_v, regress_g, regress_score):
+        """Calculate loss for one epoch of Flow Matching training
         
         Args:
-            FM: ConditionalRegularizedUnbalancedFlowMatcher instance.
-            X: List of NumPy arrays (samples at each time point).
-            time: Tensor of time points (device: self.device).
-            optimizer: PyTorch optimizer for parameter updates.
-            lambda_pen: Weight for the score net penalty term.
-            batch_size: Batch size for sampling.
-            uot_plans: Precomputed UOT plans.
-            sampling_info: Sampling information for UOT plans (chunked indices).
-            regress_v: Boolean to enable velocity net training.
-            regress_g: Boolean to enable growth net training.
-            regress_score: Boolean to enable score net training.
+            FM: ConditionalRegularizedUnbalancedFlowMatcher instance
+            X: List of numpy arrays where each element represents samples at a specific time point
+            time: Tensor of time points (device-compatible)
+            optimizer: Torch optimizer instance
+            lambda_pen: Penalty weight for score network training
+            batch_size: Batch size for sampling
+            uot_plans: Precomputed UOT plans for sampling
+            sampling_info: Additional sampling information from compute_uot_plans
+            regress_v: Flag to train velocity network (v)
+            regress_g: Flag to train growth network (g)
+            regress_score: Flag to train score network
         
         Returns:
-            tuple: (loss, penalty) → Total component loss and score net penalty.
+            tuple: (total_loss, penalty) where both are torch tensors
         """
-        # 1. Reset gradients and sample a batch of data
+        # Reset gradients before each batch
         optimizer.zero_grad()
-        t, xt, ut, gt_samp, weights, eps = get_batch_uot_fm(
-            FM, X, time, batch_size, uot_plans, sampling_info
-        )
-        t = torch.unsqueeze(t, 1).to(self.device)  # Reshape time to (B, 1) for model input
+        # Sample batch data for Flow Matching (time, positions, velocities, growth values, weights, noise)
+        t, xt, ut, gt_samp, weights, eps = get_batch_uot_fm(FM, X, time, batch_size, uot_plans, sampling_info)
+        # Reshape time tensor to (batch_size, 1) for concatenation with position data
+        t = torch.unsqueeze(t, 1).to(self.device)
 
-        # 2. Compute lambda(t) (interpolation weight for Flow Matching)
-        t_floor = torch.zeros_like(t)  # Lower bound of time interval for each sample
-        t_ceil = torch.zeros_like(t)   # Upper bound of time interval for each sample
+        # Compute lambda(t) (time-dependent weighting factor for score network)
+        t_floor = torch.zeros_like(t)
+        t_ceil = torch.zeros_like(t)
+        # Determine time interval bounds (t_floor and t_ceil) for each sample in the batch
         for j in range(len(time) - 1):
-            # Mask samples belonging to the j-th time interval [time[j], time[j+1])
             mask = (t >= time[j]) & (t < time[j + 1])
             t_floor[mask] = time[j]
             t_ceil[mask] = time[j + 1]
-        # Compute lambda(t) using normalized time within the interval
+        # Calculate normalized time within interval and compute lambda(t)
         lambda_t = FM.compute_lambda((t - t_floor) / (t_ceil - t_floor))
 
-        # 3. Score net prediction (requires autograd for gradient calculation)
-        xt = xt.requires_grad_(True)  # Enable gradients for xt (to compute score via autograd)
-        # Get model components
+        # Enable gradient computation for position data (required for score calculation via autograd)
+        xt = xt.requires_grad_(True)
+        # Get references to model components
         v_net = self.model.velocity_net
         g_net = self.model.growth_net
         score_net = self.model.score_net
-        # Concatenate xt (samples) and t (time) for model input (shape: B × (2 + 1) = B × 3)
+        # Concatenate position and time data for network input (shape: batch_size × (2 + 1) = batch_size × 3)
         net_input = torch.cat([xt, t], dim=1)
+
+        # Initialize loss and penalty
         loss = 0.0
         penalty = 0.0
-
-        # Calculate score net loss and penalty (if enabled)
+        # Train score network if enabled
         if regress_score:
-            value_st = score_net(net_input)  # Predict score potential (value function)
-            # Compute score via autograd (gradient of value_st w.r.t. xt)
+            # Predict score potential (value_st) from score network
+            value_st = score_net(net_input)
+            # Compute score via automatic differentiation (gradient of value_st w.r.t. xt)
             st = torch.autograd.grad(
                 outputs=value_st,
                 inputs=xt,
                 grad_outputs=torch.ones_like(value_st),
-                create_graph=True  # Enable higher-order gradients
+                create_graph=True  # Required for second-order gradients (if needed)
             )[0]
-            # Score loss (weighted MSE between predicted score and target)
+            # Calculate weighted MSE loss for score network
             score_loss = torch.mean(weights * ((lambda_t[:, None] * st + eps) ** 2))
-            if torch.isnan(score_loss):  # Avoid NaN loss
+            # Handle NaN loss (set to 0 to avoid training instability)
+            if torch.isnan(score_loss):
                 score_loss = 0.0
             loss += score_loss
-            # Penalty term (L1 penalty on positive score potential)
+            # Add penalty term to regularize score potential (prevents exploding values)
             penalty += lambda_pen * torch.max(torch.relu(value_st))
         
-        # Calculate velocity net loss (if enabled)
+        # Train velocity network (v) if enabled
         if regress_v:
-            v_predict = v_net(net_input)  # Predict velocity
-            # Weighted MSE loss between predicted and target velocity
+            # Predict velocity from velocity network
+            v_predict = v_net(net_input)
+            # Add weighted MSE loss between predicted and target velocities
             loss += torch.mean(weights * (v_predict - ut) ** 2)
         
-        # Calculate growth net loss (if enabled, scaled by 1000 for stability)
+        # Train growth network (g) if enabled
         if regress_g:
-            g_predict = g_net(net_input)  # Predict growth rate
-            # Weighted MSE loss between predicted and target growth rate (scaled)
+            # Predict growth values from growth network
+            g_predict = g_net(net_input)
+            # Add weighted MSE loss between predicted and target growth values (scaled by 1000 for better convergence)
             loss += 1000 * torch.mean(weights * (g_predict - gt_samp) ** 2)
 
-        return loss, penalty
-
-    def evaluate(self, data, time_points):
-        """
-        Evaluate the trained model by computing Wasserstein-1 distance and TMV (Total Mass Variation)
-        between predicted trajectories and real data.
+        return torch.as_tensor(loss, device=self.device), torch.as_tensor(penalty, device=self.device)
+    def evaluate(self,adata, data, time_points):
+        """Evaluate trained model using Wasserstein-1 distance and Total Mass Variation (TMV)
         
         Args:
-            data: List of tensors (real samples at each time point).
-            time_points: List of time values corresponding to data.
+            data: List of tensors where each element represents samples at a specific time point
+            time_points: List of time values corresponding to each element in 'data'
         
         Returns:
-            list: Wasserstein-1 distances for each time point (excluding t=0).
+            list: List of Wasserstein-1 distances for each time point (excluding initial time)
         """
-        # TODO: this function needs to be improved (handles NaN weights and empty data poorly)
-
         print(f"\n--- Starting Evaluation ---")
         device = self.device
-        x0 = data[0].to(device)  # Initial samples (t=0)
-        # Disable gradients for evaluation (save memory and speed up)
+        # Get initial time point data (t=0)
+        x0 = data[0].to(device)
+        # Freeze model parameters during evaluation (disable gradient computation)
         for param in self.model.parameters():
             param.requires_grad = False
             
-        # Get sigma (from training or default to 0.05)
+        # Get sigma parameter (use stored value or default to 0.05 if not available)
         sigma = getattr(self, 'sigma', None) or 0.05
 
         # Simulate trajectory using the trained model
         point, weight = simulate_trajectory(
+            adata,
             self.model,
             x0,
             sigma,           
@@ -614,141 +590,301 @@ class TrainingPipeline:
             dt=0.01,  # Time step for ODE simulation
             device=x0.device
         )
-        wasserstein_scores = []  # Store Wasserstein distances for each time point
-        # Evaluate each time point (excluding t=0)
+
+        # Calculate Wasserstein-1 distance for each time point (excluding initial time)
+        wasserstein_scores = []
         for idx in range(1, len(time_points)):
             t0, t1 = time_points[0], time_points[idx]
-            data_t1 = data[idx].detach().cpu().numpy()  # Real samples at t1
-            x1 = point[idx]  # Predicted samples at t1
-            m1 = weight[idx]  # Predicted weights at t1
-            # Calculate TMV (Total Mass Variation: deviation from expected mass ratio)
-            tmv = np.abs(m1.sum() - data[idx].shape[0]/data[0].shape[0])
-            m1 = m1/m1.sum()  # Normalize predicted weights to sum to 1
+            # Get target data at current time point (convert to numpy for OT computation)
+            data_t1 = data[idx].detach().cpu().numpy()
+            # Get predicted positions and weights from simulated trajectory
+            x1 = point[idx]
+            m1 = weight[idx]
 
+            # Calculate Total Mass Variation (TMV) between predicted and true mass
+            tmv = np.abs(m1.sum() - data[idx].shape[0] / data[0].shape[0])
+            # Normalize predicted weights to sum to 1 (required for OT)
+            m1 = m1 / m1.sum()
 
-            # Original (commented) code for Neural ODE step (replaced by simulate_trajectory)
-            # x1, lnw1, _ = neural_ode_step(self.ode_func, x0, lnw0, t0, t1, device)
-            # m1 = torch.exp(lnw1) / torch.exp(lnw1).sum()
-
-            # Normalize real data weights to sum to 1 (uniform distribution)
+            # Create uniform weights for target data (sum to 1)
             m2 = np.ones(data_t1.shape[0]) / data_t1.shape[0]
-            # Compute Euclidean distance matrix between real and predicted samples
+            # Compute Euclidean distance matrix between target and predicted points
             cost_matrix = ot.dist(data_t1, x1, metric='euclidean')
 
-            # Compute Wasserstein-1 distance using EMD (Earth Mover's Distance)
+            # Calculate Wasserstein-1 distance using Earth Mover's Distance (EMD)
             w1 = ot.emd2(
                 m2,
-                m1.reshape(-1),  # Flatten weights to 1D
+                m1.reshape(-1),  # Reshape to 1D array (required by ot.emd2)
                 cost_matrix,
                 numItermax=1e7  # Increase max iterations for convergence
             )
+
+            # Store results and print progress
             wasserstein_scores.append(w1)
-            # Print evaluation results
             print(f"  Time Point {t1}: Wasserstein-1 Distance = {w1:.4f}")
             print(f"  Time Point {t1}: TMV = {tmv:.4f}")
+        
         return wasserstein_scores
 
-    def evaluate_stable(self, data, time_points):
-        """
-        Stable version of the evaluate method: handles NaN weights, empty data, and EMD failures.
-        Computes Wasserstein distance (EMD or Sinkhorn fallback) and TMV.
+    
+    # def generate_state_trajectory(self, data, time_points):
+    #     """Generate reference trajectory without score guidance (using only velocity and growth components)
         
-        Args:
-            data: List of tensors (real samples at each time point).
-            time_points: List of time values corresponding to data.
+    #     Args:
+    #         data: List of tensors where each element represents samples at a specific time point
+    #         time_points: List of time values corresponding to each element in 'data'
         
-        Returns:
-            list: Wasserstein distances (EMD/Sinkhorn) for each time point (excluding t=0).
-        """
-        print(f"\n--- Starting Evaluation ---")
-        device = self.device
-        x0 = data[0].to(device)  # Initial samples (t=0)
-        # Disable gradients for evaluation
-        for param in self.model.parameters():
-            param.requires_grad = False
+    #     Returns:
+    #         list: List of tensors representing predicted positions at each time point (detached from graph)
+    #     """
+    #     # Get initial time point data (t=0)
+    #     x0 = data[0].to(self.device)
+    #     n_samples = x0.shape[0]
+
+    #     # Initialize ODE function (force disable score component)
+    #     ode_func = ODEFunc(
+    #         model=self.model,
+    #         sigma=self.config['training']['defaults'].get('sigma', 0.1),
+    #         use_mass=self.use_mass,
+    #         score_use=False,
+    #         score_flow_matching_use=False
+    #     ).to(self.device)
+
+    #     # ODE initial state: (positions, log-weights, mass)
+    #     init_lnw = torch.log(torch.ones(n_samples, 1) / n_samples).to(self.device)
+    #     init_m = torch.zeros_like(init_lnw).to(self.device)
+    #     initial_state = (x0, init_lnw, init_m)
+
+    #     # Solve ODE to get full trajectory
+    #     t_eval = torch.tensor(time_points, device=self.device, dtype=torch.float32)
+    #     traj_x, _, _ = odeint(
+    #         func=ode_func,
+    #         y0=initial_state,
+    #         t=t_eval,
+    #         method='euler'  # Euler method for ODE solving (fast but less accurate)
+    #     )
+
+    #     # Split trajectory by time point and detach from computation graph (avoid memory leaks)
+    #     return [traj_x[i].detach() for i in range(len(time_points))]
+
+
+    # def generate_state_trajectory1(self, data, time_points, reg=None, reg_m=None, method='sinkhorn', numItermax=1000,
+    #                                stopThr=1e-6, **kwargs):
+    #     """Generate trajectory with Unbalanced Sinkhorn matching (fixed: ensure valid trajectory output + add error handling)
+        
+    #     Args:
+    #         data: List of tensors where each element represents samples at a specific time point
+    #         time_points: List of time values corresponding to each element in 'data'
+    #         reg: Regularization parameter for Sinkhorn (auto-calculated if None)
+    #         reg_m: Mass regularization parameter for Unbalanced Sinkhorn (auto-calculated if None)
+    #         method: Matching method (default: 'sinkhorn')
+    #         numItermax: Maximum number of iterations for Sinkhorn
+    #         stopThr: Convergence threshold for Sinkhorn
+    #         **kwargs: Additional keyword arguments
+        
+    #     Returns:
+    #         list: List of tensors representing matched trajectory (detached from graph)
+    #     """
+    #     try:
+    #         # 1. Get number of samples at each time point
+    #         max_iter = numItermax
+    #         tol = stopThr
+    #         data_sizes = [d.shape[0] for d in data]
+    #         raw_masses = data_sizes
+
+    #         # 2. Determine sample sizes for each time point (balance between speed and accuracy)
+    #         min_size = min(data_sizes)
+    #         max_size = max(data_sizes)
+    #         print("min_size", min_size, "max_size", max_size)
             
-        # Get sigma (from training or default to 0.05)
-        sigma = getattr(self, 'sigma', None) or 0.05
+    #         if min_size >= 1024:
+    #             # Scale sample sizes proportionally if minimum size is ≥1024
+    #             sample_sizes = [max(1, int(round(1024 * s / min_size))) for s in data_sizes]
+    #         elif max_size >= 1024:
+    #             # Cap sample sizes at max_size if maximum size is ≥1024 (avoid oversampling)
+    #             sample_sizes = []
+    #             for s in data_sizes:
+    #                 target = max(1, int(round(1024 * s / min_size)))
+    #                 target = min(target, s)
+    #                 sample_sizes.append(target)
+    #         else:
+    #             # Use original sample sizes if all are <1024
+    #             sample_sizes = data_sizes
 
-        # Simulate trajectory using the trained model
-        point, weight = simulate_trajectory(
-            self.model,
-            x0,
-            sigma,           
-            time_points,
-            dt=0.01,  # Time step for ODE simulation
-            device=x0.device
-        )
-        wasserstein_scores = []  # Store Wasserstein distances
-        # Evaluate each time point (excluding t=0)
-        for idx in range(1, len(time_points)):
-            t0, t1 = time_points[0], time_points[idx]
-            data_t1 = data[idx].detach().cpu().numpy()  # Real samples at t1
-            x1 = point[idx]  # Predicted samples at t1
-            m1 = weight[idx].copy()  # Predicted weights (copy to avoid in-place modification)
-            print(m1.shape)
-            print(m1.sum())
-            print(data[idx].shape[0])
-            
-            # Detect NaN positions in predicted weights (for debugging)
-            nan_positions = np.where(np.isnan(m1))
+    #         # 3. Sample data for each time point (ensure consistent batch size)
+    #         sampled_data = []
+    #         for t_idx in range(len(time_points)):
+    #             size = sample_sizes[t_idx]
+    #             data_t = data[t_idx].to(self.device)
+    #             # Oversample if current time point has fewer samples than target size
+    #             if data_t.shape[0] < size:
+    #                 indices = torch.randint(0, data_t.shape[0], (size,), device=self.device)
+    #             else:
+    #                 # Undersample if current time point has more samples than target size
+    #                 indices = torch.randperm(data_t.shape[0], device=self.device)[:size]
+    #             sampled = data_t[indices]
+    #             sampled_data.append(sampled)
 
-            # # Print NaN positions (commented out by default)
-            # if len(nan_positions[0]) == 0:
-            #     print("m1 has no NaN values")
-            # else:
-            #     print("NaN positions in m1:")
-            #     for pos in zip(*nan_positions):
-            #         print(pos)
-                    
-            # Calculate TMV (Total Mass Variation)
-            tmv = np.abs(m1.sum() - data[idx].shape[0]/data[0].shape[0])
+    #         # 4. Unbalanced Sinkhorn matching to connect time points
+    #         matched_trajectories = [sampled_data[0]]  # Initialize trajectory with first time point
 
-            # Critical Fix 1: Handle NaN/inf weights and normalize
-            m1 = np.nan_to_num(m1, nan=0.0, posinf=0.0, neginf=0.0)  # Replace NaN/inf with 0
-            m1_sum = m1.sum()
-            if m1_sum == 0:
-                print(f"  Warning: Empty weights at time {t1}, using uniform distribution")
-                m1 = np.ones_like(m1) / len(m1)  # Fallback to uniform weights
-            else:
-                m1 = m1 / m1_sum  # Normalize weights to sum to 1
+    #         # Iterate over time points to match consecutive time steps
+    #         for t_idx in range(1, len(time_points)):
+    #             t_prev = time_points[t_idx - 1]
+    #             t_curr = time_points[t_idx]
+    #             prev_points = matched_trajectories[-1]  # Points from previous time point
+    #             curr_points = sampled_data[t_idx]  # Points from current time point
+    #             n, m = prev_points.shape[0], curr_points.shape[0]
 
-            # Critical Fix 2: Ensure real and predicted weights have the same total sum (float error correction)
-            m2 = np.ones(data_t1.shape[0]) / data_t1.shape[0]
-            m2 = m2 * m1.sum()  # Force m2 sum to match m1 sum
+    #             # Convert tensors to numpy arrays (required for OT library)
+    #             prev_np = prev_points.cpu().detach().numpy()
+    #             curr_np = curr_points.cpu().detach().numpy()
 
-            # Critical Fix 3: Skip empty data (avoid errors)
-            if data_t1.shape[0] == 0 or x1.shape[0] == 0:
-                print(f"  Skip time {t1}: Empty data points")
-                wasserstein_scores.append(np.nan)
-                continue
+    #             # Get true mass values for previous and current time points
+    #             prev_mass = raw_masses[t_idx - 1]
+    #             curr_mass = raw_masses[t_idx]
 
-            # Compute Euclidean distance matrix between real and predicted samples
-            cost_matrix = ot.dist(data_t1, x1, metric='euclidean')
+    #             # Auto-calculate regularization parameters if not provided
+    #             if reg is None or reg_m is None:
+    #                 auto_reg, auto_reg_m = self.calculate_auto_regularization(prev_np, curr_np, prev_mass, curr_mass)
+    #                 reg = auto_reg if reg is None else reg
+    #                 reg_m = auto_reg_m if reg_m is None else reg_m
+    #                 print(f"Auto-calculated regularization: reg={reg:.4f}, reg_m={reg_m:.4f}")
+    #             else:
+    #                 print(f"User-specified regularization: reg={reg:.4f}, reg_m={reg_m:.4f}")
 
-            # Critical Fix 4: Use exception handling for EMD; fallback to Sinkhorn if EMD fails
-            try:
-                # Compute Wasserstein-1 distance using EMD
-                w1 = ot.emd2(
-                    m2,
-                    m1.reshape(-1),  # Flatten weights to 1D
-                    cost_matrix,
-                    numItermax=int(1e7)  # Max iterations for EMD
-                )
-                print(f"  Time Point {t1}: Wasserstein-1 Distance = {w1:.4f}")
-            except Exception as e:
-                # Fallback to Sinkhorn distance (regularized OT) if EMD fails
-                print(f"  EMD failed for time {t1} ({str(e)}), using Sinkhorn instead")
-                w1 = ot.sinkhorn2(
-                    m2,
-                    m1.reshape(-1),
-                    cost_matrix,
-                    reg=0.1,  # Regularization parameter for Sinkhorn
-                    numItermax=int(1e7)
-                )
-                print(f"  Time Point {t1}: Sinkhorn Distance (fallback) = {w1:.4f}")
+    #             # Predict source weights (a) using growth network (fixed: ensure correct weight calculation)
+    #             # a. Initialize log-weights for previous time point (uniform distribution)
+    #             lnw_prev_init = torch.log(torch.ones(n, 1, device=self.device) / n)
+    #             # b. Define time interval for ODE solving (from previous to current time point)
+    #             t_interval = torch.tensor([t_prev, t_curr], device=self.device, dtype=torch.float32)
+    #             # c. Initialize ODE state (positions, log-weights, mass)
+    #             initial_state = (prev_points, lnw_prev_init, torch.zeros_like(lnw_prev_init, device=self.device))
+    #             # d. Solve ODE to get predicted log-weights at current time point
+    #             traj_x, traj_lnw, _ = odeint(
+    #                 func=self.ode_func,
+    #                 y0=initial_state,
+    #                 t=t_interval,
+    #                 method='euler'
+    #             )
+    #             # e. Convert log-weights to probabilities (normalize to sum to 1)
+    #             lnw_prev_pred = traj_lnw[-1]
+    #             mu_prev = torch.exp(lnw_prev_pred)
+    #             mu_prev = mu_prev / mu_prev.sum()
+    #             a = mu_prev.cpu().detach().numpy().squeeze()  # Source weights (1D array)
 
-            print(f"  Time Point {t1}: TMV = {tmv:.4f}")
-            wasserstein_scores.append(w1)
-            
-        return wasserstein_scores
+    #             # Target weights (b): uniform distribution over current time point samples
+    #             nu_curr = torch.ones(m, 1, device=self.device) / m
+    #             b = nu_curr.cpu().detach().numpy().squeeze()  # Target weights (1D array)
+
+    #             # Compute Euclidean distance matrix between previous and current points
+    #             M = ot.dist(prev_np, curr_np)
+    #             # Solve Unbalanced Sinkhorn to get transport matrix
+    #             transport_matrix = ot.unbalanced.sinkhorn_unbalanced(
+    #                 a, b, M, reg, reg_m,
+    #                 numItermax=max_iter, stopThr=tol
+    #             )
+
+    #             # Match current time point points to previous time point (max weight in transport matrix)
+    #             sinkhorn_result = torch.tensor(transport_matrix, device=self.device)
+    #             matched_indices = torch.argmax(sinkhorn_result, dim=1)  # For each previous point, find best current point
+    #             matched_points = curr_points[matched_indices]
+    #             matched_trajectories.append(matched_points)
+
+    #         # Ensure trajectory is not empty (raise error if no points were generated)
+    #         if not matched_trajectories:
+    #             raise ValueError("Trajectory generation failed: no points were generated")
+
+    #         # Detach all points from computation graph and return trajectory
+    #         trajectory = [points.detach() for points in matched_trajectories]
+    #         return trajectory
+
+    #     except Exception as e:
+    #         # Print error message and return original data (detached) as fallback
+    #         print(f"Trajectory generation encountered an error: {str(e)}")
+    #         return [data[t_idx].detach() for t_idx in range(len(time_points))]
+
+
+    # def visualize_trajectory(self, trajectory, trajectory_times):
+    #     """Visualize trajectory with scatter plots (time-colored) and connecting lines for each trajectory chain
+        
+    #     Args:
+    #         trajectory: List of tensors where each element represents predicted positions at a specific time point
+    #         trajectory_times: List of time values corresponding to each element in 'trajectory'
+    #     """
+    #     import matplotlib.pyplot as plt
+    #     import numpy as np
+
+    #     # 1. Prepare data for scatter plot (combine all time points)
+    #     all_data = np.concatenate([x.cpu().detach().numpy() for x in trajectory], axis=0)
+    #     # Create time labels for color coding (each sample gets its corresponding time point)
+    #     time_labels = np.concatenate([np.full(x.shape[0], t.item()) for x, t in zip(trajectory, trajectory_times)])
+
+    #     # 2. Create plot and scatter plot (time-colored points)
+    #     plt.figure(figsize=(8, 6))
+    #     # Scatter plot: color by time point, semi-transparent, higher z-order (on top of lines)
+    #     scatter = plt.scatter(
+    #         all_data[:, 0],
+    #         all_data[:, 1],
+    #         c=time_labels,
+    #         cmap='viridis',
+    #         alpha=0.6,
+    #         zorder=2
+    #     )
+    #     # Add color bar to indicate time point mapping
+    #     plt.colorbar(scatter, label='Time Point')
+
+    #     # 3. Add connecting lines for each trajectory chain (same sample across time points)
+    #     # Reshape trajectory to (num_time_points, num_trajectories, 2) for easy indexing
+    #     traj_matrix = np.concatenate([
+    #         pts.cpu().detach().numpy()[:, :2][None, ...]  # Shape: (1, num_trajectories, 2)
+    #         for pts in trajectory
+    #     ], axis=0)  # Final shape: (num_time_points, num_trajectories, 2)
+    #     T, n_traj = traj_matrix.shape[:2]
+
+    #     # Plot line for each trajectory chain (low alpha + low z-order to not obscure scatter points)
+    #     for traj_id in range(n_traj):
+    #         plt.plot(
+    #             traj_matrix[:, traj_id, 0],  # X-coordinates across time
+    #             traj_matrix[:, traj_id, 1],  # Y-coordinates across time
+    #             color='black',
+    #             linewidth=0.8,
+    #             alpha=0.4,
+    #             zorder=1
+    #         )
+
+    #     # Add plot labels and title
+    #     plt.xlabel('Latent Dimension 1')
+    #     plt.ylabel('Latent Dimension 2')
+    #     plt.title('Trajectory Visualization (lines connect same chain)')
+    #     # Save plot (high DPI for clarity, tight layout to avoid label cutoff)
+    #     plt.savefig("/home/sjt/workspace2/CytoBridge_test_main/figures/tra_test.png", dpi=300, bbox_inches='tight')
+
+
+    # def _plot_snapshot(self, epoch, stage_params, data, time_points, exp_fig_dir):
+    #     """Plot SDE trajectory and score field at specific time points for current epoch
+        
+    #     Args:
+    #         epoch: Current training epoch (for filename labeling)
+    #         stage_params: Stage-specific parameters (not used directly but kept for consistency)
+    #         data: Input data (not used directly but kept for consistency)
+    #         time_points: List of time points (not used directly but kept for consistency)
+    #         exp_fig_dir: Directory to save plot files
+    #     """
+    #     # Create directory for figures if it doesn't exist
+    #     os.makedirs(exp_fig_dir, exist_ok=True)
+
+    #     # 3. Plot score field for time points t=0,1,2,3,4
+    #     for t in [0, 1, 2, 3, 4]:
+    #         # Define save path with epoch and time point labels
+    #         save_score = os.path.join(exp_fig_dir, f"score_epoch{epoch}_t{t}.png")
+    #         # Generate and save score field plot
+    #         plot_score_and_gradient(
+    #             dynamical_model=self.model,
+    #             device=self.device,
+    #             t_value=float(t),  # Time point to visualize
+    #             x_range=(0, 2.5),  # X-axis range for grid
+    #             y_range=(0, 2.5),  # Y-axis range for grid
+    #             save_path=save_score,
+    #             cmap='rainbow'  # Color map for score visualization
+    #         )

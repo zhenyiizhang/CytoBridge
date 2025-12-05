@@ -1,0 +1,91 @@
+model:
+  components: ['velocity', 'growth', 'score', 'interaction']  # 保留 velocity/growth/score 组件
+  velocity_net:
+    hidden_dim: 400
+    n_layers: 2
+    residual: false  
+    activation: 'relu'  
+  growth_net:
+    hidden_dim: 400
+    n_layers: 2
+    residual: false
+    activation: 'relu'  
+  score_net:
+    hidden_dim: 128  
+    n_layers: 4     
+    activation: 'leaky_relu'  
+  interaction_net:
+    hidden_dim: 400
+    n_layers: 2
+    activation: 'leaky_relu'   
+    num_rbf: 8
+    cutoff: 0.5
+    dim_reduce: False
+
+ckpt_dir: '/home/sjt/workspace2/CytoBridge_test-main_crufm/results/cyexperiment_simulation'
+
+training:
+  defaults:
+    sigma: 0.05 
+    batch_size: 400  
+    scheduler_step_size: 100  
+    scheduler_gamma: 0.5  
+
+
+  plan:
+    - name: "Pretrain_vg1"
+      mode: "neural_ode"
+      method: "ODEFunc"
+      epochs: 200
+      global_mass: True
+      OT_loss: 'sinkhorn_detach'
+      lambda_energy: 0.0
+      scheduler_step_size: 500
+      train_strategy: "v+g"
+      lambda_ot: 1.0
+      lambda_mass: 0.1
+      lambda_energy: 0
+      lr: 0.0001
+
+    - name: "Pretrain_vi"
+      mode: "neural_ode"
+      train_strategy: "v+i"
+      epochs: 50
+      lr: 0.00001
+      OT_loss: 'emd_detach'
+      lambda_ot: 1
+      lambda_mass: 0
+      lambda_energy: 0
+      use_density_loss: True
+      lambda_density: 10
+      density_top_k: 5
+      density_hinge_value:  0.01   
+      use_mass_ode_inter: True
+
+    - name: "Train_FM" 
+      mode: "flow_matching" 
+      epochs: 3001
+      sigma: 0.05
+      train_strategy: "s"
+      scheduler_type: cosine
+      lr: 0.001
+      flow_matching:
+        lambda_penalty: 1
+
+    - name: "Finetune"
+      mode: "neural_ode"
+      train_strategy: "v+i+g+s"
+      epochs: 100
+      #global_mass: True
+      OT_loss: 'emd_detach'
+      lambda_ot: 10.0
+      lambda_mass: 10.0
+      lambda_energy: 0.01
+      lambda_pinn: 100
+      use_pinn_loss: True
+      lr: 0.00001 # 默认学习率
+      use_mass_ode_inter: True
+      use_density_loss: True
+      lambda_density: 10
+      density_top_k: 5
+      density_hinge_value:  0.01   

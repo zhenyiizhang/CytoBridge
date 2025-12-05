@@ -1,0 +1,58 @@
+model:
+  components: ['velocity', 'growth', 'score']  # 保留 velocity/growth/score 组件
+  velocity_net:
+    hidden_dim: 400
+    n_layers: 2
+    residual: false  # 不使用残差连接
+    activation: 'relu'  # 补充激活函数（常用relu）
+  growth_net:
+    hidden_dim: 400
+    n_layers: 2
+    residual: false
+    activation: 'relu'  # 补充激活函数
+  score_net:
+    hidden_dim: 128  # 与 checkpoint 保持一致
+    n_layers: 4      # 根据缺失的键推断原模型层数更多
+    activation: 'leaky_relu'  # 补充激活函数
+
+# 修正路径：将非法字符`:`改为`.`，使用正斜杠避免转义问题
+ckpt_dir: '/home/sjt/workspace2/CytoBridge_test-main_crufm/results/experiment_weinreb1'
+
+training:
+  defaults:
+    lr: 0.001  # 默认学习率
+    lambda_ot: 10.0  # OT损失权重
+    lambda_mass: 1.0  # 质量守恒损失权重
+    lambda_energy: 0.01  # 能量损失权重
+    sigma: 0.05
+    batch_size: 256  #
+    scheduler_step_size: 100  # 学习率调度器步长
+    scheduler_gamma: 0.5  # 学习率衰减因子
+
+  plan:
+    - name: "Pretrain"
+      train_strategy: "v+g"
+      mode: "neural_ode"
+      epochs: 10
+      global_mass: True
+      OT_loss: 'sinkhorn'
+      lambda_ot: 10
+      lambda_mass: 1
+      lambda_energy: 0.01
+
+    - name: "Train_FM"  # 阶段2：训练分数网络
+      mode: "flow_matching"  # 分数匹配模式
+      epochs: 30
+      sigma: 0.05
+      train_strategy: "s"
+      scheduler_type: cosine
+      flow_matching:
+        lambda_penalty: 1
+
+    - name: "Finetune"
+      mode: "neural_ode"
+      train_strategy: "v+g+s"
+      lr: 0.0001  # 默认学习率
+      epochs: 5
+      global_mass: True  # 启用全局质量约束
+      OT_loss: 'sinkhorn_detach'

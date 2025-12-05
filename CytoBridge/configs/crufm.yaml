@@ -1,0 +1,38 @@
+model:
+  components: ['velocity', 'growth', 'score'] 
+  velocity_net:
+    hidden_dim: 256
+    n_layers: 5
+    residual: false  
+  growth_net:
+    hidden_dim: 256
+    n_layers: 5
+    residual: false
+  score_net:
+    hidden_dim: 256  
+    n_layers: 4     
+
+ckpt_dir: '/home/sjt/workspace2/CytoBridge_test-main_crufm/results/results_simulation'
+
+training:
+  defaults:
+    lr: 0.0001  
+    lambda_ot: 1.0  
+    lambda_mass: 0.1 
+    lambda_energy: 0.01  
+    sigma: 0.05  
+    batch_size: 400  
+
+
+  plan:
+    - name: "Train_FM"  
+      mode: "flow_matching" 
+      lr: 0.005
+      epochs: 3000
+      sigma: 0.05
+      train_strategy: "v+g+s"
+      batch_size: 400
+      scheduler_type: cosine
+      save_strategy: "best"   
+      flow_matching:
+        lambda_penalty: 1

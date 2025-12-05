@@ -8,7 +8,7 @@ import yaml
 from CytoBridge.utils.config import load_config
 from CytoBridge.tl.models import DynamicalModel
 from CytoBridge.tl.trainer import TrainingPipeline
-
+from CytoBridge.tl.interaction import cal_interaction
 
 def fit(adata: sc.AnnData,
         config: Dict[str, Any] | str,
@@ -58,7 +58,14 @@ def fit(adata: sc.AnnData,
     if 'score' in model.components:
         score = model.score_net(net_input)
         adata.obsm['score_latent'] = score.detach().cpu().numpy()
-
+    print(model.components)
+    # if 'interaction' and "growth" in model.components:
+    #     interaction =  cal_interaction(all_data, growth, model.interaction_net, use_mass =True).float()
+    #     adata.obsm['interaction'] = interaction.detach().cpu().numpy()
+    # elif 'interaction' in model.components:
+    #     interaction =  cal_interaction(all_data, model.interaction_net, use_mass =False).float()
+    #     adata.obsm['interaction'] = interaction.detach().cpu().numpy()
+    
     # ---------- 6. store model internals ----------
     adata.uns['all_model'] = {
         'model_config': resolved_config['model'],
@@ -82,6 +89,6 @@ def fit(adata: sc.AnnData,
 
     print(f"Model & data saved -> {ckpt_dir}")
     
-    trainer.evaluate(data_torch, time_points)  # TODO handle hold-out
+    trainer.evaluate(adata,data_torch, time_points)  # TODO handle hold-out
 
     return adata

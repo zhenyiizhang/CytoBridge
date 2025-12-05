@@ -1,17 +1,15 @@
 import torch
 import torch.nn as nn
+import torch.nn.init as init
 from typing import List, Dict, Any, Optional
-
+from CytoBridge.tl.interaction import ExpNormalSmearing, CosineCutoff, cal_interaction
 ACTIVATION_FN = {
     'relu': nn.ReLU,
     'leaky_relu': nn.LeakyReLU,
     'silu': nn.SiLU,
     'tanh': nn.Tanh,
 }
-
-
 class HyperNetwork(nn.Module):
-    # 
     def __init__(
             self,
             input_dim: int,
@@ -67,7 +65,70 @@ class HyperNetwork(nn.Module):
         return x
 
 
+class InteractionModel(nn.Module):
+    def __init__(self, x_dim,n_layers=2 , hidden_dim=400, activation='leaky_relu', num_rbf=16, cutoff=1, dim_reduce = False, residual = False):
+        if activation not in ACTIVATION_FN:
+            raise ValueError(f"Activation '{activation}' not recognized.")
 
+        self.n_layers = n_layers
+        self.residual = residual
+        act_fn = ACTIVATION_FN[activation]
+        super().__init__()
+        self.num_rbf = num_rbf
+        self.cutoff = cutoff
+        self.rbf_expansion = ExpNormalSmearing(cutoff=cutoff, num_rbf = self.num_rbf, trainable= True)
+
+        if n_layers == 0:
+            self.input_layer = nn.Linear(self.num_rbf, 1)
+            self.hidden_layers = nn.ModuleList([])
+            self.output_layer = nn.Identity()
+        else:
+            self.input_layer = nn.Sequential(
+                nn.Linear(self.num_rbf, hidden_dim),
+                act_fn()
+            )
+            self.hidden_layers = nn.ModuleList(
+                nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim),
+                    act_fn()
+                )
+                for _ in range(n_layers - 1)
+            )
+            self.output_layer = nn.Linear(hidden_dim, 1)
+
+        self.cutoff = cutoff
+        self.eps = 1e-6
+        self.dim_reduce = dim_reduce
+        if self.dim_reduce:
+            self.pca = nn.Linear(x_dim, 10, bias=False)
+        self._initialize_weights()
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    init.zeros_(m.bias)
+    def forward(self, x_t):
+        if self.cutoff == 0:
+            return 0 * x_t.sum()
+        if self.dim_reduce:
+            x_t = self.pca(x_t)
+        dis = self.compute_distance(x_t)
+        dis_exp = self.rbf_expansion(dis[dis != 0])
+
+        if self.n_layers == 0:
+            return self.input_layer(dis_exp)
+        x = self.input_layer(dis_exp)
+        for layer in self.hidden_layers:
+            if self.residual:
+                x = x + layer(x)
+            else:
+                x = layer(x)
+        potential = self.output_layer(x)
+        return potential
+
+    def compute_distance(self, x):
+        return torch.sqrt(torch.sum(x ** 2, dim=1, keepdim=True) + self.eps)
 
 
 class DynamicalModel(nn.Module):
@@ -75,19 +136,20 @@ class DynamicalModel(nn.Module):
             self,
             latent_dim: int,
             config: Dict[str, Any],
+            use_growth_in_ode_inter = True
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.config = config
         self.components = config['components']
-        self.net_input_dim = self.latent_dim + 1  # （x + t）
-
+        self.net_input_dim = self.latent_dim + 1  # 状态+时间（x + t）
         for comp_name in self.components:
             net_name = f'{comp_name}_net'
             if net_name not in self.config:
                 raise ValueError(f"Configuration for component '{comp_name}' not found.")
 
-            comp_config = self.config[net_name].copy()  #
+            comp_config = self.config[net_name].copy() 
+
             if comp_name == 'velocity':
                 network = HyperNetwork(
                     input_dim=self.net_input_dim,
@@ -109,13 +171,15 @@ class DynamicalModel(nn.Module):
                     **comp_config
                 )
 
-            # TODO: add interaction results
+            elif comp_name == 'interaction':
+                self.use_growth_in_ode_inter = use_growth_in_ode_inter 
+                network = InteractionModel(self.latent_dim, **comp_config)
             else:
                 raise ValueError(f"Unknown dynamical component: '{comp_name}'")
 
             self.add_module(f"{comp_name}_net", network)
 
-    def forward(self, t: torch.Tensor, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, t: torch.Tensor, x: torch.Tensor, lnw: torch.Tensor,except_interaction:bool = True) -> Dict[str, torch.Tensor]:
         # Ensure t is a 2D tensor [batch_size, 1]
         if t.dim() == 1:
             t = t.unsqueeze(1)  # 从[batch_size] -> [batch_size, 1]
@@ -145,6 +209,11 @@ class DynamicalModel(nn.Module):
                 create_graph=True
             )[0]
             outputs['score_gradient'] = gradient
+
+        # Handle interaction component
+        if 'interaction' in self.components and except_interaction :
+            #print("self.use_growth_in_ode_inter", self.use_growth_in_ode_inter)
+            outputs['interaction'] = cal_interaction(x, lnw, self.interaction_net, cutoff = self.interaction_net.cutoff, use_mass = self.use_growth_in_ode_inter).float()
 
         return outputs
 
