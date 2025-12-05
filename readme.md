@@ -1,9 +1,11 @@
 <!-- PROJECT LOGO -->
 <br />
+
 <div align="center">
   <a href="https://github.com/zhenyiizhang/CytoBridge/">
     <img src="figures/logo.png" alt="Logo" height="150" style="margin-bottom: 0px;">
   </a>
+
 
   <h3 align="center">CytoBridge: A Toolkit for Single Cell Spatiotemporal Dynamical Generative Modeling</h3>
 
@@ -21,11 +23,13 @@ The core of CytoBridge is to model cellular processes by learning a dynamical mo
 The package is built to be modular, allowing users to easily combine these components to replicate existing models or create novel ones.
 
 <br />
+
 <div align="center">
   <a href="https://github.com/zhenyiizhang/CytoBridge/">
     <img src="figures/model.png" alt="model" height="350">
   </a>
 </div>
+
 
 
 ## Current Status
@@ -51,45 +55,57 @@ We are continuously working to expand the capabilities of CytoBridge. Our develo
 
   - [x] **Phase 2: Advanced Modeling & Downstream Analysis**
 - [x] Implementation of the `interaction` component for modeling cell-cell communication.
-    - [x] Advanced plotting functions and downstream analysis.
+  - [x] Advanced plotting functions and downstream analysis.
 
 
   - [ ] **Phase 3: Spatiotemporal Dynamics**
 
     - [ ] Support for time serise spatial transcriptomics data.
     - [ ] Advanced plotting functions and downstream analysis.
-Here’s a polished and reorganized version of your installation and usage instructions, with improved clarity and flow:
+      Here’s a polished and reorganized version of your installation and usage instructions, with improved clarity and flow:
 
 ---
 
 ## Installation
 
-CytoBridge is currently in developing stage. You can install it directly from the repository for testing and contribution:
+CytoBridge is currently under active development. You can install it using the methods outlined below:
 
-### Option 1: Install via pip  
+### Recommended Approach: Install via pip  
+
+Install CytoBridge quickly and easily using pip:
+
 ```bash
 pip install CytoBridge
 ```
 
-### Option 2: Clone the Repository  
-1. Clone the Repository  
+### Developer Approach: Clone the Repository  
+
+This approach is suitable for developers who want to modify the source code or contribute to the project:  
+
+1. Clone the repository to your local machine  
+
 ```bash
 git clone https://github.com/zhenyiizhang/CytoBridge.git
 ```
-2. We need to set up a  Conda environment to manage dependencies.Follow these steps:
-   
-   (1)Create and activate a new Conda environment
+
+2. Set up a Conda environment to manage dependencies  
+   Follow the steps below to create an isolated environment for CytoBridge:  
+
+   (1) Create and activate a new Conda environment  
+
    ```bash
    conda create -n CytoBridge python=3.10 ipykernel -y
    conda activate CytoBridge
    ```
 
-   (2)Navigate to the cloned repository
+   (2) Navigate to the root directory of the cloned repository  
+
    ```bash
    cd path_to_CytoBridge
    ```
 
-   (3)Install required packages 
+   (3) Install all required dependencies  
+
    ```bash
    pip install -r requirements.txt
    ```
@@ -97,7 +113,7 @@ git clone https://github.com/zhenyiizhang/CytoBridge.git
 ## Basic Usage
 
 CytoBridge supports both **h5ad** and **csv** inputs.  
-For a complete walk-through, see the web page :
+For a complete walk-through, see the web page : https://cytobridge.readthedocs.io/en/latest/
 
 Folloing are two examples's training process:
 
@@ -165,13 +181,15 @@ adata.write_h5ad("results_with_model.h5ad")
 ```
 
 Both snippets return an `AnnData` object containing:
+
 - trained model: `adata.uns['dynamic_model']`  
 - latent velocity: `adata.obsm['velocity_latent']`  
 - growth rates: `adata.obsm['growth_rate']` (when applicable)
 
 ## Detailed usage
 
-Please refer to webpage ：
+Please refer to webpage ：https://cytobridge.readthedocs.io/en/latest/
+
 ## Update Log  
 
 **CytoBridge 1.2** (2025-10-29)  
@@ -186,7 +204,7 @@ Please refer to webpage ：
 - `interaction` component released →  cell-cell communication. ready  
 - Conditional Flow Matching and  CytoBrigde (interaction) pipeline stable under default hyper-params  (config/ruot)
 - New plots: interaction_stream, interaction_potential, landscape , process_sde_classification and analyze_terminal_states
--  `test` refreshed with downstream examples
+- `test` refreshed with downstream examples
 
 **CytoBridge 1.4** (2025-12-01)
 
@@ -205,4 +223,5 @@ CytoBridge is licensed under the GPL-3.0 License.
 4. Yuhao Sun, Zhenyi Zhang, Zihan Wang, Tiejun Li, and Peijie Zhou. “Variational Regularized Unbalanced Optimal Transport: Single Network, Least Action”. In: *NeurIPS 2025*.
 5. Dongyi Wang, Yuanwei Jiang, Zhenyi Zhang, Xiang Gu, Peijie Zhou, and Jian Sun. “Joint Velocity-Growth Flow Matching for Single-Cell Dynamics Modeling”. In: *NeurIPS 2025*.
 6. Qiangwei Peng, Peijie Zhou, and Tiejun Li. “stVCR: Reconstructing spatio-temporal dynamics of cell development using optimal transport”. In: bioRxiv, 2024, pp. 2024–06.
-7. https://github.com/zhenyiizhang/DeepRUOTv2
+7. Zhenyi Zhang, Zihan Wang, Yuhao Sun, Jiantao Shen, Qiangwei Peng, Tiejun Li, and Peijie Zhou. “Deciphering cell-fate trajectories using spatiotemporal single-cell transcriptomic data“. In: *npj Syst Biol Appl 2025*.
+8. https://github.com/zhenyiizhang/DeepRUOTv2
