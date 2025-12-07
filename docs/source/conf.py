@@ -13,8 +13,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 project = 'cytobridge'
-copyright = '2025, kello'
-author = 'kello'
+copyright = '2025, CytoBridge Developer team'
+author = 'CytoBridge Developer team'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
