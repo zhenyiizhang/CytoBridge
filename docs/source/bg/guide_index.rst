@@ -5,7 +5,7 @@ Base Guide
    :maxdepth: 1
    :caption: Tutorials
 
+   PAT
    MBHBP
    SDBP
-   PAT
    CDDACT
