@@ -5,4 +5,4 @@ installation
    :maxdepth: 1
    :hidden:
 
-   notebooks/install
+   notebooks/Installation
