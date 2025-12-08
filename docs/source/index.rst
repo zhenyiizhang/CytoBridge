@@ -3,7 +3,7 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-CytoBridge: A Toolkit for Single Cell Spatiotemporal Dynamical Generative Modeling
+CytoBridge: 
 ======================================================================================
 
 **CytoBridge** is a Python package designed to provide a unified and extensible
@@ -106,6 +106,7 @@ Here’s a polished and reorganized version of your installation and usage instr
    :hidden:
 
    GitHub <https://github.com/zhenyiizhang/CytoBridge/tree/main>
+
 
 
 
