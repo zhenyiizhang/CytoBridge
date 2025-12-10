@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 
-project = 'cytobridge'
+project = 'CytoBridge'
 copyright = '2025, CytoBridge Developer team'
 author = 'CytoBridge Developer team'
 
