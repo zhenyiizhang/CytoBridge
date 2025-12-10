@@ -1,4 +1,4 @@
-.. cytobridge documentation master file, created by
+.. CytoBridge documentation master file, created by
    sphinx-quickstart on Sun Nov 30 21:09:27 2025.
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
@@ -51,7 +51,7 @@ CytoBridge is currently under active development. The foundational framework is 
 * **Unbalanced Dynamical OT** (velocity + growth)
 * **Regularized Unbalanced OT (RUOT)** (velocity + growth + stochasticity)
 * **Conditional RegularizedOT Unbalanced  Flow Matching (CRUFM)**  (velocity + growth + stochasticity)
-* **CytoBridge**  (velocity + growth + stochasticity + interaction)
+* **cytobridge**  (velocity + growth + stochasticity + interaction)
 
 ----
 

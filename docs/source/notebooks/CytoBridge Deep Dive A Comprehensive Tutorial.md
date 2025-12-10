@@ -53,7 +53,7 @@ CytoBridge is designed for **single-cell transcriptomic data (scRNA-seq/spatial 
 
 ```python
 import scanpy as sc
-import cytobridge as cb
+import CytoBridge as cb
 
 # 1. Load data
 adata = sc.read_h5ad("raw_scrna_data.h5ad")
@@ -108,7 +108,7 @@ Preprocessing reduces noise and extracts biologically meaningful features for dy
 ```python
 import scanpy as sc
 
-import cytobridge as cb
+import CytoBridge as cb
 
 # Load data
 
@@ -327,7 +327,7 @@ Ensures the model preserves **local cell population sizes**—critical for model
 
 #### Use Cases
 
-* Models with `Growth` (Unbalanced OT, RUOT, CytoBridge).
+* Models with `Growth` (Unbalanced OT, RUOT, cytobridge).
 * Datasets where cell proliferation/apoptosis is heterogeneous (e.g., tumor cores vs. edges).
 
 #### Key Parameters
@@ -342,11 +342,11 @@ Ensures the model preserves **local cell population sizes**—critical for model
 
 #### Core Function
 
-Models **stochasticity** in cell state transitions—required for models with the `Score` component (RUOT, CytoBridge). It trains the model to predict the "score" (gradient of the log density) of noisy cell states, capturing biological noise.
+Models **stochasticity** in cell state transitions—required for models with the `Score` component (RUOT, cytobridge). It trains the model to predict the "score" (gradient of the log density) of noisy cell states, capturing biological noise.
 
 #### Use Cases
 
-* Models with `Score` (RUOT, CytoBridge).
+* Models with `Score` (RUOT, cytobridge).
 * Datasets with stochastic cell fate decisions (e.g., stem cell differentiation, iPSC reprogramming).
 
 #### Key Parameters
@@ -388,7 +388,7 @@ Enforces **physical constraints** on cell dynamics—specifically the **continui
 
 #### Use Cases
 
-* Models with `Velocity`, `Growth`, or `Interaction` (CytoBridge).
+* Models with `Velocity`, `Growth`, or `Interaction` (cytobridge).
 * Mechanistic studies where dynamics must follow physical laws (e.g., tissue growth, cell migration).
 
 #### Key Parameters
