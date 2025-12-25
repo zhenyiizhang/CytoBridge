@@ -336,19 +336,8 @@ def generate_sde_trajectories(
         raise ValueError(f"No data found for init_time={init_time}")
     x0 = torch.tensor(adata[init_mask].obsm["X_latent"], dtype=torch.float32, device=device)
     x0 = x0.requires_grad_(True)
-    try:
-        length = adata.uns['all_model']['training_config']['defaults']["batch_size"]
-    except KeyError:
-        try:
-            training_config = adata.uns['all_model']['training_config']
-            for key in training_config.keys():
-                length = training_config[key].get("batch_size")
-                if length is not None:
-                    break  
-            else:
-                length = 400
-        except KeyError:
-            length = 400
+
+    length = x0.shape[0]
     lnw0 = torch.log(torch.ones(x0.shape[0], 1, device=device) / length)
     initial_state = (x0, lnw0)
 
@@ -568,21 +557,8 @@ def generate_ode_trajectories(
     t_point = torch.tensor(unique_times, dtype=torch.float32, device=device)
     dt = (t_max-t_min)/(len(t_bins)-1)
 
-    try:
-        length = adata.uns['all_model']['training_config']['defaults']["batch_size"]
-    except KeyError:
-        try:
-            training_config = adata.uns['all_model']['training_config']
-            for key in training_config.keys():
-                length = training_config[key].get("batch_size")
-                if length is not None:
-                    break  
-            else:
-                length = 400
-        except KeyError:
-            length = 400
 
-    init_lnw = torch.log(torch.ones(n_trajectories, 1) /length).to(device)
+    init_lnw = torch.log(torch.ones(n_trajectories, 1) /n_trajectories).to(device)
     init_m   = torch.zeros_like(init_lnw)
     initial_state = (init_x, init_lnw, init_m)
     if split_true :
@@ -610,7 +586,7 @@ def generate_ode_trajectories(
 
 def simulate_trajectory(adata,model, x0, sigma, time, dt, device):
     x0 = x0.requires_grad_(True)
-    lnw0 = torch.log(torch.ones(x0.shape[0], 1, device=device, dtype=torch.float32) / adata.uns['all_model']['training_config']['defaults']["batch_size"])
+    lnw0 = torch.log(torch.ones(x0.shape[0], 1, device=device, dtype=torch.float32) / x0.shape[0])
     initial_state = (x0, lnw0)
 
     class CytoSDE(torch.nn.Module):
@@ -758,7 +734,7 @@ def train_mlp_classifier(
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
     # Train the model
-    for epoch in range(train_mlp_classifier_epoches):
+    for epoch in range(train_mlp_classifier_epoches):f
         model.train()
         X_train.requires_grad_(True)
         
