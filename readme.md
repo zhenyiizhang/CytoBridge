@@ -14,6 +14,7 @@
 ## Announcement 
 
 - **06/30/2026** CytoBridge is being integrated with BioMaster to support agent-driven virtual-cell dynamical modeling workflows. This integration connects BioMaster's research orchestration capabilities with CytoBridge's spatiotemporal dynamical generative modeling toolkit. A more advanced release is coming soon. Please stay tuned!
+- **Core Developers:** Zhenyi Zhang and [Zihan Wang](https://github.com/JackkWangzh).
 
 ---
 
