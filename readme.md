@@ -11,6 +11,12 @@
 
 </div>
 
+## Announcement 
+
+- **06/30/2026** CytoBridge is being integrated with BioMaster to support agent-driven virtual-cell dynamical modeling workflows. This integration connects BioMaster's research orchestration capabilities with CytoBridge's spatiotemporal dynamical generative modeling toolkit. A more advanced release is coming soon. Please stay tuned!
+
+---
+
 **CytoBridge** is a Python package designed to provide a unified and extensible framework for modeling cellular dynamics using Spatiotemporal Dynamical Generative Models. Our goal is to connect cutting-edge theoretical frameworks with practical, easy-to-use tools.
 
 The core of CytoBridge is to model cellular processes by learning a dynamical model that accounts for various biological phenomena using time-series transcriptomics data (including both scRNA-seq and spatial data):
